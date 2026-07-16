@@ -1,0 +1,93 @@
+name: muk.events runner watchdog
+
+# The router for the self-hosted migration. Every other workflow reads its
+# runs-on labels from the MUK_CI_LABELS repo variable; this is the only job
+# that must stay on GitHub-hosted runners, because its whole purpose is to
+# work when the runner box does not.
+#
+# Why a 6-hourly watchdog and not a per-run router job: a router fronting
+# every CI run would itself bill one hosted minute per run (~340 CI runs a
+# month — more than this month's remaining budget on its own). Flipping a
+# variable out-of-band costs ~4 billed minutes a day and routing stays free
+# on every actual CI run. The trade-off is failover lag: with the box down,
+# CI sits queued for up to 6 hours before the flip. workflow_dispatch is the
+# manual override — runnable from the GitHub mobile app.
+#
+# Two modes:
+#   - With the RUNNER_WATCHDOG_TOKEN secret (fine-grained PAT for this repo,
+#     Administration: read + Variables: read/write): checks whether any
+#     muk-ci runner is online and sets MUK_CI_LABELS to the self-hosted pool
+#     or ubuntu-latest accordingly. Fails (= emails the owner) whenever the
+#     pool is down, so the flip never happens silently.
+#   - Without it: cannot read runner status or write variables, so it only
+#     looks for CI runs stuck in queue and fails to raise the alarm; routing
+#     then has to be flipped by hand in Settings → Secrets and variables →
+#     Actions → Variables.
+
+on:
+  workflow_call:
+    secrets:
+      RUNNER_WATCHDOG_TOKEN:
+        required: false
+
+permissions:
+  actions: read
+
+concurrency:
+  group: runner-watchdog
+  cancel-in-progress: true
+
+jobs:
+  route:
+    name: Route CI to a live runner pool
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check muk-ci runners and set MUK_CI_LABELS
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_WATCHDOG_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SELF_HOSTED: '["self-hosted","muk-ci"]'
+          HOSTED: '["ubuntu-latest"]'
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::RUNNER_WATCHDOG_TOKEN not set — automatic failover is disabled. Create a fine-grained PAT for this repo with Administration:read and Variables:read/write and store it as that secret."
+            export GH_TOKEN="$FALLBACK_TOKEN"
+            # Degraded mode: infer trouble from CI runs stuck in queue. A run
+            # can also queue behind a busy runner, so use a generous age.
+            cutoff="$(date -u -v-45M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '45 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+            stuck=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?status=queued&per_page=50" \
+              --jq "[.workflow_runs[] | select(.created_at < \"$cutoff\")] | length")
+            if [ "$stuck" -gt 0 ]; then
+              echo "::error::$stuck workflow run(s) have been queued for over 45 minutes — the muk-ci runners are probably down (or just very busy). Bring the box back, or flip MUK_CI_LABELS to [\"ubuntu-latest\"] in Settings → Variables."
+              exit 1
+            fi
+            echo "No stuck runs; assuming the muk-ci pool is healthy."
+            exit 0
+          fi
+
+          online=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runners" \
+            --jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-ci"))] | length')
+          current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" --jq '.value' 2>/dev/null || echo "")
+
+          if [ "$online" -ge 1 ]; then desired="$SELF_HOSTED"; else desired="$HOSTED"; fi
+
+          # PATCH cannot bootstrap a deleted variable (separate create/update
+          # endpoints — Codex P2 on PR #144), and routing must keep working in
+          # exactly that state, so recreate it when the GET came back empty.
+          if [ -z "$current" ]; then
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/actions/variables" \
+              -f name=MUK_CI_LABELS -f value="$desired"
+            echo "MUK_CI_LABELS was missing — created as '$desired' ($online muk-ci runner(s) online)"
+          elif [ "$current" != "$desired" ]; then
+            gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" \
+              -f name=MUK_CI_LABELS -f value="$desired"
+            echo "MUK_CI_LABELS: '$current' -> '$desired' ($online muk-ci runner(s) online)"
+          else
+            echo "MUK_CI_LABELS already '$current' ($online muk-ci runner(s) online)"
+          fi
+
+          if [ "$online" -eq 0 ]; then
+            echo "::error::No muk-ci runner online — CI is routed to ubuntu-latest and is burning paid minutes. Bring the box back; the next watchdog run (or a manual dispatch of this workflow) routes CI home."
+            exit 1
+          fi

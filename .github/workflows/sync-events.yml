@@ -1,0 +1,60 @@
+name: muk.events sync events
+
+# The only automatic trigger for the RSS feed seed: the login form used to fire
+# /api/events/sync on every sign-in too, which re-ran the whole pipeline once
+# per login for a feed that changes a few times a week. The hourly timer alone
+# now keeps the feed fresh (worst-case staleness ~1h) and logins cost nothing;
+# /api/events/sync stays available for manual kicks.
+#
+# The function gateway has JWT verification on, so the request needs the
+# project's publishable key *and* the function's own MUK_SYNC_TOKEN — the same
+# pair app/api/events/sync/route.ts sends.
+
+on:
+  workflow_call:
+    secrets:
+      NEXT_PUBLIC_SUPABASE_URL:
+        required: true
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        required: true
+      MUK_SYNC_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Trigger muk-sync-events
+    # Hourly on GitHub-hosted runners this was ~720 billed minutes a month for
+    # a curl call. Routed to the self-hosted pool like ci.yml; if the box is
+    # down the feed just goes stale until runner-watchdog.yml re-routes, which
+    # is exactly the staleness the cron already tolerates.
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Call the edge function
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          MUK_SYNC_TOKEN: ${{ secrets.MUK_SYNC_TOKEN }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$MUK_SYNC_TOKEN" ]; then
+            echo "::error::Sync secrets not set — the feed would silently go stale. This cron exists so freshness does not depend on traffic; a missing secret must alarm, not skip."
+            exit 1
+          fi
+
+          status=$(curl --silent --show-error --output /tmp/sync.json --write-out '%{http_code}' \
+            --request POST "$SUPABASE_URL/functions/v1/muk-sync-events" \
+            --header "content-type: application/json" \
+            --header "authorization: Bearer $SUPABASE_KEY" \
+            --header "apikey: $SUPABASE_KEY" \
+            --data "{\"token\":\"$MUK_SYNC_TOKEN\"}")
+
+          cat /tmp/sync.json
+          echo
+
+          if [ "$status" != "200" ]; then
+            echo "::error::muk-sync-events returned HTTP $status"
+            exit 1
+          fi

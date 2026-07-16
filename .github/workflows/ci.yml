@@ -1,0 +1,477 @@
+name: muk.events CI
+
+on:
+  workflow_call:
+    secrets:
+      NEXT_PUBLIC_SUPABASE_URL:
+        required: true
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        required: true
+      SUPABASE_DB_URL:
+        required: true
+      SUPABASE_ACCESS_TOKEN:
+        required: true
+      E2E_ADMIN_NAME:
+        required: true
+      E2E_ADMIN_PASSWORD:
+        required: true
+      E2E_ADMIN_EMAIL:
+        required: true
+      E2E_STAFF_NAME:
+        required: true
+      E2E_STAFF_PASSWORD:
+        required: true
+      E2E_STAFF_EMAIL:
+        required: true
+      E2E_TOGGLE_NAME:
+        required: true
+      E2E_TOGGLE_PASSWORD:
+        required: true
+      E2E_TOGGLE_EMAIL:
+        required: true
+      E2E_KIOSK_NAME:
+        required: true
+      E2E_KIOSK_PASSWORD:
+        required: true
+      E2E_KIOSK_EMAIL:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Not a secret: the project ref is already recorded in supabase/MIGRATIONS.md.
+  SUPABASE_PROJECT_REF: dtuisqhdkomdvbxzzifu
+
+# Every job runs on the self-hosted muk-ci pool by default — GitHub-hosted
+# minutes were about to breach the plan cap. The labels come from the
+# MUK_CI_LABELS repo variable so CI can be re-routed to ubuntu-latest without
+# a commit: runner-watchdog.yml flips the variable when no muk-ci runner is
+# online (and back), and a human can flip it in Settings → Variables from a
+# phone. The fallback literal keeps the expression working if the variable is
+# ever deleted. See docs/self-hosted-runners.md.
+#
+# timeout-minutes on every job is not optional here: a hung job on a
+# self-hosted runner holds one of the machine's few slots for the default
+# 6 hours.
+
+jobs:
+  quality:
+    name: Lint, typecheck, edge functions & build
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          # The self-hosted machine already keeps ~/.npm between jobs. The
+          # Actions cache lives in GitHub's cloud and was downloading the same
+          # 1.4 GB archive once per job, taking ~7 minutes to save ~10 seconds
+          # in npm ci. Keep it off even during the hosted fallback.
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Check
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+  rules:
+    name: Project rules
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 15
+    steps:
+      # Every secret-gated step below self-skips when its secret is absent
+      # (correct for forks; this repo is private, so there are none). Without
+      # this assertion a rotated/renamed secret — or a Dependabot PR, which
+      # only receives *Dependabot* secrets — silently turns the whole job into
+      # a no-op that still reports green. Fail loudly instead.
+      - name: Required secrets are present
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$SUPABASE_DB_URL" ] || missing="$missing SUPABASE_DB_URL"
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — every check in this job would silently pass while enforcing nothing. On a Dependabot PR this means the Actions secrets have not been mirrored to Dependabot secrets (gh secret set <NAME> --app dependabot)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Both sides of the diff have to be present to compare them.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: New muk RLS policies are scoped to muk membership
+        if: github.event_name == 'pull_request'
+        run: node scripts/lint-migration-rls.mjs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      # Read-only, and it runs on PRs rather than only at deploy time for two
+      # reasons: it catches prod drifting from the repo *before* you stack
+      # another migration on top of it, and it proves SUPABASE_DB_URL still
+      # works while a failure is still cheap — rather than at the moment the
+      # deploy job first needs it.
+      #
+      # Deliberately NOT strict: a migration awaiting deploy is normal pipeline
+      # state here, not drift. The first strict version of this step deadlocked
+      # main — deploy-db needs this job green, and this job rejected the very
+      # migration deploy-db existed to apply. Renames still fail; "prod never
+      # got it" is enforced where it means something: post-deploy and nightly.
+      - name: Prod schema is in sync and muk RLS is still scoped
+        id: drift
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::notice::SUPABASE_DB_URL not set — skipping the prod schema checks."
+            exit 0
+          fi
+
+          # psql only treats its argument as a URI when it starts with the
+          # scheme; anything else it reads as a bare database name and quietly
+          # dials a local unix socket, which fails with a baffling error. Say
+          # what is actually wrong instead.
+          case "$SUPABASE_DB_URL" in
+            postgresql://*|postgres://*) ;;
+            *)
+              echo "::error::SUPABASE_DB_URL is set but is not a connection URI — psql read it as a database name and tried a local socket. It must start with 'postgresql://'. Copy the Session pooler URI from Supabase → Connect (host aws-*.pooler.supabase.com, port 5432, user postgres.<ref>), substitute the password, and store it with no surrounding quotes and no 'SUPABASE_DB_URL=' prefix. If the password contains @ : / ? # or %, percent-encode it."
+              exit 1
+              ;;
+          esac
+
+          node scripts/check-migration-drift.mjs
+          psql "$SUPABASE_DB_URL" --no-psqlrc -v ON_ERROR_STOP=1 -f scripts/assert-rls-scoping.sql
+
+      # Skipped while migrations await deploy: committed types are generated
+      # FROM prod, so they cannot match a schema prod doesn't have yet. The
+      # nightly run re-checks strictly once the deploy has landed.
+      - name: types/supabase.ts matches the prod schema
+        if: steps.drift.outputs.pending == '' || steps.drift.outputs.pending == '0'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::notice::SUPABASE_ACCESS_TOKEN not set — skipping the generated-types drift check."
+            exit 0
+          fi
+          npx --yes supabase@2.105.0 gen types typescript \
+            --project-id "$SUPABASE_PROJECT_REF" --schema muk > /tmp/supabase.ts
+          if ! diff -u types/supabase.ts /tmp/supabase.ts; then
+            echo "::error::types/supabase.ts is stale. Run 'npm run gen:types' and commit the result."
+            exit 1
+          fi
+          echo "types/supabase.ts is up to date."
+
+  # Read-only mirror of the two deploy jobs, visible as its own green check on
+  # every PR: are prod's schema AND edge functions in sync with what the repo
+  # says, and what exactly will the merge deploy? The migrations half repeats
+  # the rules job's non-strict drift check purely for visibility; the functions
+  # half is the only staleness check the functions have before merge — it
+  # catches a main whose function changes never deployed (e.g. the deploy jobs
+  # were skipped because another job was red, which happened three merges in a
+  # row on 2026-07-13). Both halves self-skip without their secret, so forks
+  # stay green.
+  sync:
+    name: Prod sync (migrations & edge functions)
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 15
+    steps:
+      # See the identical step in the rules job.
+      - name: Required secrets are present
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$SUPABASE_DB_URL" ] || missing="$missing SUPABASE_DB_URL"
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — both sync checks would silently skip. On a Dependabot PR, mirror the Actions secrets to Dependabot secrets."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The staleness check dates each function's last source change at the
+          # BASE of the PR, which needs history beyond the merge commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        with:
+          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+
+      - name: Migrations match the prod ledger
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::notice::SUPABASE_DB_URL not set — skipping the migration sync check."
+            exit 0
+          fi
+          # Non-strict: a migration this PR adds is "awaiting deploy", not
+          # drift. Renames and lost migrations still fail.
+          node scripts/check-migration-drift.mjs
+
+      - name: Edge functions are deployed and not stale
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          # The PR's own function changes deploy on merge; only the base
+          # branch's sources must already be live.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::notice::SUPABASE_ACCESS_TOKEN not set — skipping the edge function sync check."
+            exit 0
+          fi
+          node scripts/check-functions-sync.mjs
+
+  # The Lighthouse budget job lives in lighthouse.yml, NOT here: it runs on
+  # the self-hosted muk-ci runner, and inside this workflow's non-cancelling
+  # main concurrency group a perf job queued by an offline runner would hold
+  # the run open and queue later pushes — and their deploys — behind it.
+
+  e2e:
+    name: Playwright e2e
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 40
+    env:
+      # The muk-ci runners share one machine with the Lighthouse job (which
+      # owns :3200) and any dev servers running there. A dedicated port keeps
+      # parallel jobs from booting into — or handshake-failing against — each
+      # other's servers. All e2e jobs share the e2e-prod concurrency group, so
+      # one port suffices across ci.yml and browser-matrix.yml.
+      E2E_PORT: "3100"
+      # `playwright install`'s cache GC follows its ~/Library/Caches/
+      # ms-playwright/.links registry into every checkout that ever ran
+      # playwright on the box — including ones under ~/Documents, which macOS
+      # TCC-protects. A launchd runner has no Documents grant, so the open()
+      # inside that GC blocks forever (observed 2026-07-16: two 13-minute
+      # "Install Playwright browsers" hangs, stack stuck in __open). Skipping
+      # the GC skips the traversal; the cache just never self-prunes here.
+      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+    # The suite runs against the shared production database with three shared
+    # test accounts (one of which mutations.spec.ts demotes and re-promotes).
+    # The workflow-level concurrency group is per-ref, so two open PRs would
+    # otherwise run e2e simultaneously against the same accounts. This group is
+    # repo-wide: one prod e2e run at a time, queued not cancelled. (GitHub
+    # keeps only one run pending per group — with three PRs racing, the oldest
+    # pending one is cancelled and needs a re-run; acceptable, and rare here.)
+    concurrency:
+      group: e2e-prod
+      cancel-in-progress: false
+    steps:
+      # The authenticated specs self-skip without the E2E_* secrets, degrading
+      # this required check to "the homepage renders" while still reporting
+      # green — which is exactly what happens on a Dependabot PR until the
+      # Actions secrets are mirrored to Dependabot secrets. Fail loudly.
+      - name: Required secrets are present
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+          E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
+          E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
+          E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
+          E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
+          E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
+          E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
+          E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
+          E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
+          E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
+        run: |
+          missing=""
+          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
+                      SUPABASE_DB_URL \
+                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
+                      E2E_STAFF_NAME E2E_STAFF_PASSWORD E2E_STAFF_EMAIL \
+                      E2E_TOGGLE_NAME E2E_TOGGLE_PASSWORD E2E_TOGGLE_EMAIL \
+                      E2E_KIOSK_NAME E2E_KIOSK_PASSWORD E2E_KIOSK_EMAIL; do
+            eval "value=\${$name:-}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — the authenticated e2e specs would self-skip and this required check would pass having proven nothing. On a Dependabot PR, mirror the Actions secrets to Dependabot secrets (gh secret set <NAME> --app dependabot)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          # See the quality job: the runner-local npm cache is already warm,
+          # while setup-node's cloud cache restored a 1.4 GB archive per job.
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # Self-hosted runners reuse the machine between runs. The port is
+      # dedicated to this job and the e2e-prod group serializes its users, so
+      # anything still listening on it is a `next start` a killed run left
+      # behind — remove it before Playwright fails to boot its own server.
+      - name: Free the e2e port
+        shell: bash
+        run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
+
+      - name: Run e2e tests
+        # Authenticated specs self-skip when the E2E_* secrets are absent, and
+        # the app deliberately tolerates missing Supabase env (getSupabaseConfig
+        # returns null), so the public rendering specs stay meaningful on forks.
+        run: npm run test:e2e -- --project=chromium
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+          E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
+          E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
+          E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
+          E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
+          E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
+          E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
+          E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
+          E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
+          E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      # The mutation suite (tests/mutations.spec.ts) deletes its own test event
+      # through the UI, but a run that dies mid-test strands it. The suite tags
+      # every event it creates with this run's id, so this sweep deletes
+      # exactly this run's debris immediately — the old 2-hour age window could
+      # never match the very run that stranded the event. Scoped to the marker
+      # AND the admin source, so a real event can never match. The age-based
+      # blanket sweep for runs killed too hard for even `if: always()` lives in
+      # scheduled-checks.yml.
+      - name: Sweep this run's test events
+        if: ${{ always() }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then exit 0; fi
+          psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --command \
+            "with removed as (delete from muk.events where source = 'muk-events-admin' and title like 'E2E-TEST r${{ github.run_id }} %' returning id) select 'swept ' || count(*) || ' stranded test event(s)' from removed"
+
+  # ---------------------------------------------------------------------------
+  # Continuous delivery. Vercel already ships the Next.js app from main via its
+  # git integration; these two jobs close the gap the 2026-07-13 audit had to
+  # reconcile by hand — the database schema and the edge functions, both of
+  # which were applied to production manually until now.
+  #
+  # Each self-skips when its secret is absent, so the pipeline stays green until
+  # the secrets are added (see supabase/MIGRATIONS.md).
+  # ---------------------------------------------------------------------------
+  deploy-db:
+    name: Deploy migrations
+    needs: [quality, rules, e2e]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Running deploys self-hosted puts SUPABASE_DB_URL / SUPABASE_ACCESS_TOKEN
+    # on our own hardware instead of a disposable VM — accepted 2026-07-16 to
+    # stay under the Actions minutes cap; the box already runs everything else
+    # under one user. Revisit when hardening (docs/self-hosted-runners.md).
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        with:
+          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+
+      - name: Push migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::SUPABASE_DB_URL not set — cannot deploy migrations. A deploy job that decides not to deploy is a failed deploy, not a green one."
+            exit 1
+          fi
+          # --db-url avoids `supabase link` (this repo has no config.toml). Only
+          # migrations missing from the remote ledger run; the other apps'
+          # migrations are already recorded there and are left untouched.
+          supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Assert muk RLS is still scoped to muk membership
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then exit 0; fi
+          psql "$SUPABASE_DB_URL" --no-psqlrc -v ON_ERROR_STOP=1 -f scripts/assert-rls-scoping.sql
+
+      # STRICT here: the push above just ran, so anything still missing from the
+      # ledger means the deploy genuinely lost it.
+      - name: Check for drift
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          STRICT: "1"
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then exit 0; fi
+          node scripts/check-migration-drift.mjs
+
+  deploy-functions:
+    name: Deploy edge functions
+    needs: [deploy-db]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        with:
+          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+
+      # Deploys every function rather than only the changed ones: it is
+      # idempotent, takes about a minute, and makes source drift between
+      # supabase/functions/ and the deployed code structurally impossible — the
+      # drift the audit had to rule out by hand. Function secrets live in the
+      # Supabase dashboard and are not touched by a deploy.
+      - name: Deploy functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN not set — cannot deploy edge functions."
+            exit 1
+          fi
+          supabase functions deploy --project-ref "$SUPABASE_PROJECT_REF"
