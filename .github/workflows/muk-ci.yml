@@ -247,7 +247,109 @@ jobs:
           fi
           node scripts/check-functions-sync.mjs
 
-  # The Lighthouse budget job lives in lighthouse.yml, NOT here: it runs on
+  # Proves every muk migration still applies, in filename order, to an empty
+  # database with only the Supabase scaffolding (scripts/ci-db-shim.sql) in
+  # place — before deploy-db replays the new ones onto shared prod. This
+  # replaced creating a paid Supabase preview branch per check. Scratch
+  # databases are named by run id, so concurrent runs — this repo's or any
+  # other repo's served by this pipeline — never collide. Files in
+  # scripts/ci-db-replay-skip.txt (other apps' migrations recorded in the
+  # shared ledger) are skipped, exactly as `supabase db push` skips them.
+  migrations:
+    name: Migrations replay (scratch Postgres)
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    env:
+      SCRATCH_DB: muk_ci_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Ensure a local PostgreSQL with the pg_cron stub
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Hosted fallback (runner-watchdog flipped MUK_CI_LABELS): the
+            # ubuntu image ships a stopped PostgreSQL. Its major version may
+            # trail prod's 17 — acceptable for a does-it-apply check.
+            sudo systemctl start postgresql
+            sudo -u postgres createuser --superuser "$(whoami)" || true
+            extdir="$(pg_config --sharedir)/extension"
+            SUDO="sudo"
+            echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
+            export PGHOST=/var/run/postgresql
+          else
+            # The Mac Studio runs Homebrew postgresql@17 as a brew service
+            # (docs/self-hosted-runners.md). Its share dir is user-writable
+            # but wiped by brew upgrades, so reinstall the stub every run.
+            extdir="/opt/homebrew/opt/postgresql@17/share/postgresql/extension"
+            SUDO=""
+            echo "PGHOST=/tmp" >> "$GITHUB_ENV"
+            export PGHOST=/tmp
+          fi
+          # Real pg_cron can only be created in the one database named by
+          # cron.database_name, which breaks one-scratch-database-per-run.
+          # The stub records schedule/unschedule calls in cron.job; nothing
+          # executes in the background.
+          $SUDO tee "$extdir/pg_cron.control" >/dev/null <<'EOF'
+          comment = 'CI stub of pg_cron: schedule/unschedule write to cron.job, no background worker'
+          default_version = '1.6'
+          relocatable = false
+          schema = cron
+          EOF
+          $SUDO tee "$extdir/pg_cron--1.6.sql" >/dev/null <<'EOF'
+          \echo Use "CREATE EXTENSION pg_cron" to load this file. \quit
+          create table job (
+              jobid bigserial primary key,
+              schedule text not null,
+              command text not null,
+              nodename text not null default 'localhost',
+              nodeport int not null default 5432,
+              database text not null default current_database(),
+              username text not null default current_user,
+              active boolean not null default true,
+              jobname text unique
+          );
+          create function schedule(job_name text, schedule text, command text)
+          returns bigint language sql as $$
+              insert into cron.job (jobname, schedule, command)
+              values (job_name, schedule, command)
+              on conflict (jobname)
+              do update set schedule = excluded.schedule, command = excluded.command
+              returning jobid;
+          $$;
+          create function schedule(schedule text, command text)
+          returns bigint language sql as $$
+              insert into cron.job (schedule, command) values (schedule, command)
+              returning jobid;
+          $$;
+          create function unschedule(job_name text)
+          returns boolean language sql as $$
+              delete from cron.job where jobname = job_name;
+              select true;
+          $$;
+          EOF
+          psql postgres -v ON_ERROR_STOP=1 -qtAc "select 'postgres ' || current_setting('server_version')"
+
+      - name: Replay migrations onto a scratch database
+        shell: bash
+        run: |
+          psql postgres -v ON_ERROR_STOP=1 -qc "create database \"$SCRATCH_DB\""
+          psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f scripts/ci-db-shim.sql
+          for f in supabase/migrations/*.sql; do
+            base=$(basename "$f")
+            if grep -qxF "$base" scripts/ci-db-replay-skip.txt; then
+              echo "skipped $base (another app's migration, see the skip list)"
+              continue
+            fi
+            echo "applying $base"
+            psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Drop the scratch database
+        if: ${{ always() }}
+        run: psql postgres -qc "drop database if exists \"$SCRATCH_DB\"" || true
+
+  # The Lighthouse budget job lives in muk-lighthouse.yml, NOT here: it runs on
   # the self-hosted muk-ci runner, and inside this workflow's non-cancelling
   # main concurrency group a perf job queued by an offline runner would hold
   # the run open and queue later pushes — and their deploys — behind it.
@@ -261,7 +363,7 @@ jobs:
       # owns :3200) and any dev servers running there. A dedicated port keeps
       # parallel jobs from booting into — or handshake-failing against — each
       # other's servers. All e2e jobs share the e2e-prod concurrency group, so
-      # one port suffices across ci.yml and browser-matrix.yml.
+      # one port suffices across muk-ci.yml and muk-browser-matrix.yml.
       E2E_PORT: "3100"
       # `playwright install`'s cache GC follows its ~/Library/Caches/
       # ms-playwright/.links registry into every checkout that ever ran
@@ -399,7 +501,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-db:
     name: Deploy migrations
-    needs: [quality, rules, e2e]
+    needs: [quality, rules, migrations, e2e]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # Running deploys self-hosted puts SUPABASE_DB_URL / SUPABASE_ACCESS_TOKEN
     # on our own hardware instead of a disposable VM — accepted 2026-07-16 to

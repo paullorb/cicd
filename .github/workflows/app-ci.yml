@@ -1,0 +1,95 @@
+name: App CI
+
+# Generic CI for a Next.js app that keeps its schema in supabase/migrations/
+# (first caller: paullorber). Lint, audit, build, and replay the migrations
+# onto a scratch database on a local PostgreSQL server — no Supabase preview
+# branch, no secrets. Apps whose build needs env vars should add
+# workflow_call inputs/secrets here when a caller actually needs them.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+# Runner routing mirrors the muk workflows: the caller repository's CI_LABELS
+# variable picks the pool, defaulting to GitHub-hosted. Repo-level runners on
+# a personal account serve exactly one repository, so the muk-ci pool is not
+# reachable from other repos; hosted minutes are fine at these repos' volume.
+
+jobs:
+  quality:
+    name: Lint, audit & build
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          # The app repo owns its Node version.
+          node-version-file: .node-version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  # Proves every migration applies cleanly to an empty database, in filename
+  # order, before it ever reaches the shared production project. Scratch
+  # databases are named by run id, so concurrent runs — including runs from
+  # other repos served by this pipeline — never collide.
+  migrations:
+    name: Migrations replay (scratch Postgres)
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    env:
+      SCRATCH_DB: ci_${{ github.repository_id }}_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Start local PostgreSQL
+        # The ubuntu runner image ships a stopped PostgreSQL server. This step
+        # assumes a Linux runner; if a caller ever routes CI_LABELS to the Mac
+        # Studio, borrow the dual-OS setup step from muk-ci.yml.
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres createuser --superuser "$(whoami)" || true
+          echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
+
+      - name: Replay migrations onto a scratch database
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(supabase/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no files in supabase/migrations/ — this job should not be enabled for a repo without migrations"
+            exit 1
+          fi
+          psql postgres -v ON_ERROR_STOP=1 -qc "create database \"$SCRATCH_DB\""
+          # Optional per-repo scaffolding, mirroring muk-ci.yml: a shim for
+          # objects that predate the migrations, and a skip list for files
+          # recorded in a shared ledger but owned by another repo.
+          if [ -f scripts/ci-db-shim.sql ]; then
+            psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f scripts/ci-db-shim.sql
+          fi
+          for f in "${files[@]}"; do
+            base=$(basename "$f")
+            if [ -f scripts/ci-db-replay-skip.txt ] && grep -qxF "$base" scripts/ci-db-replay-skip.txt; then
+              echo "skipped $base (listed in scripts/ci-db-replay-skip.txt)"
+              continue
+            fi
+            echo "applying $base"
+            psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Drop the scratch database
+        if: ${{ always() }}
+        run: psql postgres -qc "drop database if exists \"$SCRATCH_DB\"" || true
