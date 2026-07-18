@@ -362,6 +362,21 @@ jobs:
             psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f "$f"
           done
 
+      # Same RLS-scoping assertion the deploy and nightly runs make against prod,
+      # but here against the just-built scratch schema — so a migration that adds
+      # an unscoped policy, a table without RLS, or (as in #163) a new SECURITY
+      # DEFINER function granted to authenticated that was never added to the
+      # reviewed allowlist FAILS AT PR TIME, before it reaches prod. The prod
+      # assertion only sees such an object post-deploy (it queries live prod),
+      # which is why #163 turned main red only after merge. The scratch snapshot
+      # mirrors prod's hand-created state via scripts/ci-db-shim.sql (e.g. RLS on
+      # muk.users); keep that faithful when this fails on an object prod is fine
+      # with. It is a subset of prod's objects, so it never flags a policy or
+      # function that the prod run would pass.
+      - name: RLS scoping holds on the freshly-built schema
+        shell: bash
+        run: psql "$SCRATCH_DB" --no-psqlrc -v ON_ERROR_STOP=1 -f scripts/assert-rls-scoping.sql
+
       - name: Drop the scratch database
         if: ${{ always() }}
         run: psql postgres -qc "drop database if exists \"$SCRATCH_DB\"" || true
