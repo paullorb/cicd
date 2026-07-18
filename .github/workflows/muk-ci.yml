@@ -381,10 +381,103 @@ jobs:
         if: ${{ always() }}
         run: psql postgres -qc "drop database if exists \"$SCRATCH_DB\"" || true
 
-  # The Lighthouse budget job lives in muk-lighthouse.yml, NOT here: it runs on
-  # the self-hosted muk-ci runner, and inside this workflow's non-cancelling
-  # main concurrency group a perf job queued by an offline runner would hold
-  # the run open and queue later pushes — and their deploys — behind it.
+  # Advisory perf/a11y/byte budgets, in this workflow so a PR shows every check
+  # in one graph. Mobile-only on purpose: the app's real users are almost all
+  # on phones, and mobile is Lighthouse's default form factor with CPU/network
+  # throttling — the old desktop pass asserted the same deterministic byte
+  # budgets without the throttling, so it added runtime without adding signal.
+  #
+  # NOT a required check (not in the branch ruleset): a blown budget turns the
+  # run red for a human to look at, but auto-merge never waits on it.
+  #
+  # This job used to live in muk-lighthouse.yml with its own concurrency group
+  # (Codex review on muk PR #126): queued by an offline runner inside this
+  # workflow's non-cancelling main group, it would have held the run open and
+  # queued later pushes — and their deploys — behind it. Two things changed
+  # since: runner-watchdog.yml flips MUK_CI_LABELS to hosted runners when the
+  # muk-ci pool is offline (this job now follows the variable; the old workflow
+  # pinned the label and just sat), and deploy jobs do not `needs` this one, so
+  # only the *next* push's run can ever wait on it, bounded by timeout-minutes.
+  perf:
+    name: Lighthouse budget (mobile)
+    # Forked PRs get no repository secrets; internal PRs and main pushes run
+    # the full authenticated matrix.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    # :3200 is one port on a shared machine — one Lighthouse at a time across
+    # all runs, queued not cancelled, exactly like the e2e-prod group (same
+    # rare oldest-pending-cancelled caveat with three runs racing).
+    concurrency:
+      group: lighthouse
+      cancel-in-progress: false
+    # Warm mobile-only runs took ~9 minutes when this was the desktop pass of
+    # the standalone workflow (same URL count and sample count); a cold box or
+    # the hosted fallback needs the headroom.
+    timeout-minutes: 30
+    env:
+      # Reserved for CI. Local Next dev keeps its default :3000, so Lighthouse
+      # cannot block or accidentally audit a Codex/Claude development server.
+      LIGHTHOUSE_PORT: "3200"
+      E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          # See the quality job: the runner-local npm cache is already warm.
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # LHCI's authenticated-browser hook uses puppeteer-core from Lighthouse's
+      # dependency tree. Point it at the runner's installed Chrome explicitly;
+      # puppeteer-core deliberately ships without its own browser download.
+      - name: Locate Chrome
+        shell: bash
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            chrome_path="$(command -v google-chrome)"
+          elif command -v chromium >/dev/null 2>&1; then
+            chrome_path="$(command -v chromium)"
+          elif [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+            chrome_path="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          else
+            echo "Chrome executable not found" >&2
+            exit 1
+          fi
+          echo "CHROME_PATH=$chrome_path" >> "$GITHUB_ENV"
+
+      # The port is CI-owned and the lighthouse group serializes its users, so
+      # a listener here can only be debris from a killed Lighthouse run. Clear
+      # it without touching the :3000 dev server used by Codex, Claude, or a
+      # human.
+      - name: Free the Lighthouse port
+        shell: bash
+        run: lsof -ti :"$LIGHTHOUSE_PORT" | xargs kill 2>/dev/null || true
+
+      # Public, authenticated, legacy-redirect and deterministic invalid-token
+      # surfaces share the same hard byte budgets (lighthouserc.json — mobile
+      # settings). Scores stay advisory because even a dedicated runner has
+      # timing noise; transfer size does not. `lhci autorun` starts and stops
+      # `npm run start` itself against the already-built app. PRs take one
+      # sample per route for fast feedback; main keeps three samples for the
+      # stable baseline. `/theke` is intentionally absent until this job has
+      # kiosk credentials: an admin session is redirected to `/check-in`, so
+      # including it only audits the same page twice and attributes the
+      # redirect cost to check-in.
+      - name: Lighthouse CI (mobile)
+        uses: treosh/lighthouse-ci-action@3e7e23fb74242897f95c0ba9cabad3d0227b9b18 # 12.6.2
+        with:
+          configPath: ./lighthouserc.json
+          runs: ${{ github.event_name == 'pull_request' && '1' || '3' }}
 
   e2e:
     name: Playwright e2e
@@ -531,8 +624,13 @@ jobs:
   # Each self-skips when its secret is absent, so the pipeline stays green until
   # the secrets are added (see supabase/MIGRATIONS.md).
   # ---------------------------------------------------------------------------
+  # The three production-deploy jobs carry "merge to main only" in their names
+  # because a PR's run renders them as skipped — which read as "this never
+  # deployed". It did: the squash-merge pushes main, that push starts its own
+  # run of this same workflow, and THAT run deploys. The PR run's skip is the
+  # design, not a failure.
   deploy-db:
-    name: Deploy migrations
+    name: Deploy migrations (merge to main only)
     needs: [quality, rules, migrations, e2e]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # Running deploys self-hosted puts SUPABASE_DB_URL / SUPABASE_ACCESS_TOKEN
@@ -583,7 +681,7 @@ jobs:
           node scripts/check-migration-drift.mjs
 
   deploy-functions:
-    name: Deploy edge functions
+    name: Deploy edge functions (merge to main only)
     needs: [deploy-db]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
@@ -628,7 +726,7 @@ jobs:
   # uploads the source exactly as the git integration did.
   # ---------------------------------------------------------------------------
   deploy-preview:
-    name: Deploy app to Vercel (preview)
+    name: Deploy app to Vercel (preview — PRs only)
     needs: [quality, rules, migrations, e2e]
     if: >-
       github.event_name == 'pull_request' &&
@@ -662,7 +760,7 @@ jobs:
           printf '### Vercel preview\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-app:
-    name: Deploy app to Vercel (production)
+    name: Deploy app to Vercel (production — merge to main only)
     # After the backend: the schema and edge functions must be live before the
     # frontend that depends on them. deploy-functions already needs deploy-db.
     needs: [deploy-functions]

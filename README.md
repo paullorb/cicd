@@ -12,8 +12,7 @@ the secrets its workflow requires.
 
 | Workflow | Caller | Trigger |
 |---|---|---|
-| `muk-ci.yml` | muk.events | pull requests and pushes to `main` |
-| `muk-lighthouse.yml` | muk.events | pull requests and pushes to `main` |
+| `muk-ci.yml` | muk.events | pull requests and pushes to `main` (includes the advisory mobile Lighthouse budget) |
 | `muk-browser-matrix.yml` | muk.events | weekly and manual |
 | `muk-scheduled-checks.yml` | muk.events | daily and manual |
 | `muk-sync-events.yml` | muk.events | hourly and manual |
