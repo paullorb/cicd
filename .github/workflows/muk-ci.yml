@@ -479,6 +479,13 @@ jobs:
           configPath: ./lighthouserc.json
           runs: ${{ github.event_name == 'pull_request' && '1' || '3' }}
 
+      # Keep the exact representative scores and Web Vitals on the run page.
+      # The formatter also includes every non-passing assertion and all sample
+      # values, so an advisory score no longer requires opening the raw log.
+      - name: Add Lighthouse results to run summary
+        if: ${{ always() }}
+        run: node scripts/write-ci-summary.mjs lighthouse .lighthouseci
+
   e2e:
     name: Playwright e2e
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
@@ -498,6 +505,9 @@ jobs:
       # "Install Playwright browsers" hangs, stack stuck in __open). Skipping
       # the GC skips the traversal; the cache just never self-prunes here.
       PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+      # The JSON reporter feeds the Actions run summary. The list reporter
+      # remains enabled for the live log; no separate HTML artifact is needed.
+      PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-results.json"
     # The suite runs against the shared production database with three shared
     # test accounts (one of which mutations.spec.ts demotes and re-promotes).
     # The workflow-level concurrency group is per-ref, so two open PRs would
@@ -573,7 +583,7 @@ jobs:
         # Authenticated specs self-skip when the E2E_* secrets are absent, and
         # the app deliberately tolerates missing Supabase env (getSupabaseConfig
         # returns null), so the public rendering specs stay meaningful on forks.
-        run: npm run test:e2e -- --project=chromium
+        run: npm run test:e2e -- --project=chromium --reporter=list,json
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
@@ -590,13 +600,9 @@ jobs:
           E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
           E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
 
-      - name: Upload Playwright report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
+      - name: Add Playwright results to run summary
+        if: ${{ always() }}
+        run: node scripts/write-ci-summary.mjs playwright .playwright-results.json
 
       # The mutation suite (tests/mutations.spec.ts) deletes its own test event
       # through the UI, but a run that dies mid-test strands it. The suite tags
