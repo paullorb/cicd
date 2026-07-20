@@ -50,8 +50,8 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 40
     env:
-      # Same dedicated port as ci.yml's e2e job — safe because every e2e job
-      # sits in the e2e-prod concurrency group and therefore runs alone.
+      # Same dedicated port as ci.yml's e2e shard 1 — safe because this workflow
+      # joins that shard's e2e-prod-set-1 group and so never runs beside it.
       E2E_PORT: "3100"
       # See ci.yml's e2e job: the install-time cache GC hangs on TCC-protected
       # paths when run from a launchd runner.
@@ -60,12 +60,13 @@ jobs:
       fail-fast: false
       matrix:
         browser: [firefox, webkit]
-    # Same repo-wide lock as ci.yml's e2e job: the suite mutates shared prod
-    # accounts (mutations.spec.ts demotes/re-promotes the toggle account), so
-    # the two matrix jobs must not run at the same time as each other or as a
-    # PR's e2e run. Queued, not cancelled.
+    # This suite runs against account SET 1 (it doesn't set E2E_ACCOUNT_SET), so
+    # it shares ci.yml's e2e-prod-set-1 lock: firefox and webkit never run at the
+    # same time as each other or as a PR's shard-1, which mutates the same shared
+    # accounts (mutations.spec.ts demotes/re-promotes the toggle account). A PR's
+    # shard-2 uses set 2 and is free to run alongside. Queued, not cancelled.
     concurrency:
-      group: e2e-prod
+      group: e2e-prod-set-1
       cancel-in-progress: false
     steps:
       # Without the E2E_* secrets the authenticated suites self-skip and the
