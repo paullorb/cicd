@@ -35,6 +35,35 @@ on:
         required: true
       E2E_KIOSK_EMAIL:
         required: true
+      # Account SET 2 — the second independent set the e2e job shards across, so
+      # shard 2 mutates its own accounts in parallel with shard 1. Optional so
+      # the workflow contract stays valid before they exist, but the e2e gate
+      # stays red until they are set (shard 2 fails its presence check): only
+      # bump a consumer's pin to a SHA with sharding AFTER creating these.
+      E2E_ADMIN_NAME_2:
+        required: false
+      E2E_ADMIN_PASSWORD_2:
+        required: false
+      E2E_ADMIN_EMAIL_2:
+        required: false
+      E2E_STAFF_NAME_2:
+        required: false
+      E2E_STAFF_PASSWORD_2:
+        required: false
+      E2E_STAFF_EMAIL_2:
+        required: false
+      E2E_TOGGLE_NAME_2:
+        required: false
+      E2E_TOGGLE_PASSWORD_2:
+        required: false
+      E2E_TOGGLE_EMAIL_2:
+        required: false
+      E2E_KIOSK_NAME_2:
+        required: false
+      E2E_KIOSK_PASSWORD_2:
+        required: false
+      E2E_KIOSK_EMAIL_2:
+        required: false
       # Optional: the Playwright suite's invite-acceptance specs create a test
       # member and then delete it again through the admin UI, whose delete is a
       # Next.js server action needing the service-role client. Without the key
@@ -500,17 +529,47 @@ jobs:
         if: ${{ always() }}
         run: node scripts/write-ci-summary.mjs lighthouse .lighthouseci
 
+  # PR-only, and sharded across two independent prod account SETS so the two
+  # shards run in parallel without ever mutating the same accounts (see
+  # tests/helpers.ts: E2E_ACCOUNT_SET). Two things this buys:
+  #   - Once per change. A squash-merge lands the exact tree the PR shards
+  #     already exercised, so re-running e2e on the main push proved nothing;
+  #     the merge is gated on branch-up-to-date (main ruleset) instead, and
+  #     deploy-backend no longer needs e2e. Halves the e2e load on the shared
+  #     accounts and drops ~e2e off production delivery.
+  #   - Half the wall time. `--shard=i/2` splits the specs; each shard boots its
+  #     own server on its own port and serializes only against its own set's
+  #     e2e-prod-set-<n> group (one PR's shard-1 waits on another PR's shard-1,
+  #     never on its own shard-2). muk-browser-matrix.yml uses set 1, so it
+  #     joins e2e-prod-set-1.
   e2e:
-    name: Playwright e2e
+    name: Playwright e2e (shard ${{ matrix.shard }})
+    if: github.event_name == 'pull_request'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            set: "1"
+            port: "3100"
+          - shard: 2
+            set: "2"
+            port: "3101"
+    concurrency:
+      group: e2e-prod-set-${{ matrix.set }}
+      cancel-in-progress: false
     env:
-      # The muk-ci runners share one machine with the Lighthouse job (which
-      # owns :3200) and any dev servers running there. A dedicated port keeps
-      # parallel jobs from booting into — or handshake-failing against — each
-      # other's servers. All e2e jobs share the e2e-prod concurrency group, so
-      # one port suffices across muk-ci.yml and muk-browser-matrix.yml.
-      E2E_PORT: "3100"
+      # A dedicated port per shard keeps the two parallel servers off each
+      # other (and off :3200, the Lighthouse port).
+      E2E_PORT: ${{ matrix.port }}
+      # Picks this shard's account set in tests/helpers.ts.
+      E2E_ACCOUNT_SET: ${{ matrix.set }}
+      # Marker scope for the events/invites the suite creates. Per-shard (the
+      # set suffix) so the sweep below deletes exactly this shard's debris and
+      # never the sibling shard's in-flight events — both share GITHUB_RUN_ID.
+      E2E_RUN_SCOPE: r${{ github.run_id }}-s${{ matrix.set }}
       # `playwright install`'s cache GC follows its ~/Library/Caches/
       # ms-playwright/.links registry into every checkout that ever ran
       # playwright on the box — including ones under ~/Documents, which macOS
@@ -522,51 +581,62 @@ jobs:
       # The JSON reporter feeds the Actions run summary. The list reporter
       # remains enabled for the live log; no separate HTML artifact is needed.
       PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-results.json"
-    # The suite runs against the shared production database with three shared
-    # test accounts (one of which mutations.spec.ts demotes and re-promotes).
-    # The workflow-level concurrency group is per-ref, so two open PRs would
-    # otherwise run e2e simultaneously against the same accounts. This group is
-    # repo-wide: one prod e2e run at a time, queued not cancelled. (GitHub
-    # keeps only one run pending per group — with three PRs racing, the oldest
-    # pending one is cancelled and needs a re-run; acceptable, and rare here.)
-    concurrency:
-      group: e2e-prod
-      cancel-in-progress: false
+      # Both sets are exposed to every shard (secrets can't be indexed by a
+      # matrix value); tests/helpers.ts reads the one matching E2E_ACCOUNT_SET.
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # Consumed by the app under test, not Playwright: the admin UI's
+      # delete-user server action needs it to remove the member the
+      # invite-acceptance specs create.
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+      E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+      E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
+      E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
+      E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
+      E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
+      E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
+      E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
+      E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
+      E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
+      E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
+      E2E_ADMIN_NAME_2: ${{ secrets.E2E_ADMIN_NAME_2 }}
+      E2E_ADMIN_PASSWORD_2: ${{ secrets.E2E_ADMIN_PASSWORD_2 }}
+      E2E_ADMIN_EMAIL_2: ${{ secrets.E2E_ADMIN_EMAIL_2 }}
+      E2E_STAFF_NAME_2: ${{ secrets.E2E_STAFF_NAME_2 }}
+      E2E_STAFF_PASSWORD_2: ${{ secrets.E2E_STAFF_PASSWORD_2 }}
+      E2E_STAFF_EMAIL_2: ${{ secrets.E2E_STAFF_EMAIL_2 }}
+      E2E_TOGGLE_NAME_2: ${{ secrets.E2E_TOGGLE_NAME_2 }}
+      E2E_TOGGLE_PASSWORD_2: ${{ secrets.E2E_TOGGLE_PASSWORD_2 }}
+      E2E_TOGGLE_EMAIL_2: ${{ secrets.E2E_TOGGLE_EMAIL_2 }}
+      E2E_KIOSK_NAME_2: ${{ secrets.E2E_KIOSK_NAME_2 }}
+      E2E_KIOSK_PASSWORD_2: ${{ secrets.E2E_KIOSK_PASSWORD_2 }}
+      E2E_KIOSK_EMAIL_2: ${{ secrets.E2E_KIOSK_EMAIL_2 }}
     steps:
       # The authenticated specs self-skip without the E2E_* secrets, degrading
-      # this required check to "the homepage renders" while still reporting
-      # green — which is exactly what happens on a Dependabot PR until the
-      # Actions secrets are mirrored to Dependabot secrets. Fail loudly.
+      # this check to "the homepage renders" while still reporting green — which
+      # is exactly what happens on a Dependabot PR until the Actions secrets are
+      # mirrored to Dependabot secrets. Fail loudly. Validates THIS shard's set.
       - name: Required secrets are present
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
-          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
-          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
-          E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
-          E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
-          E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
-          E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
-          E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
-          E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
-          E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
-          E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
-          E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
         run: |
+          suffix=""
+          [ "${{ matrix.set }}" = "1" ] || suffix="_${{ matrix.set }}"
           missing=""
-          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
-                      SUPABASE_DB_URL \
-                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
+          for base in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY SUPABASE_DB_URL; do
+            eval "value=\${$base:-}"
+            [ -n "$value" ] || missing="$missing $base"
+          done
+          for base in E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
                       E2E_STAFF_NAME E2E_STAFF_PASSWORD E2E_STAFF_EMAIL \
                       E2E_TOGGLE_NAME E2E_TOGGLE_PASSWORD E2E_TOGGLE_EMAIL \
                       E2E_KIOSK_NAME E2E_KIOSK_PASSWORD E2E_KIOSK_EMAIL; do
-            eval "value=\${$name:-}"
-            [ -n "$value" ] || missing="$missing $name"
+            eval "value=\${${base}${suffix}:-}"
+            [ -n "$value" ] || missing="$missing ${base}${suffix}"
           done
           if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing — the authenticated e2e specs would self-skip and this required check would pass having proven nothing. On a Dependabot PR, mirror the Actions secrets to Dependabot secrets (gh secret set <NAME> --app dependabot)."
+            echo "::error::Missing secret(s) for account set ${{ matrix.set }}:$missing — the authenticated e2e specs would self-skip and this check would pass having proven nothing. Set 2 is the sharding set (gh secret set E2E_*_2). On a Dependabot PR, mirror the Actions secrets to Dependabot secrets."
             exit 1
           fi
 
@@ -586,8 +656,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # Self-hosted runners reuse the machine between runs. The port is
-      # dedicated to this job and the e2e-prod group serializes its users, so
-      # anything still listening on it is a `next start` a killed run left
+      # dedicated to this shard and the e2e-prod-set group serializes its users,
+      # so anything still listening on it is a `next start` a killed run left
       # behind — remove it before Playwright fails to boot its own server.
       - name: Free the e2e port
         shell: bash
@@ -597,26 +667,7 @@ jobs:
         # Authenticated specs self-skip when the E2E_* secrets are absent, and
         # the app deliberately tolerates missing Supabase env (getSupabaseConfig
         # returns null), so the public rendering specs stay meaningful on forks.
-        run: npm run test:e2e -- --project=chromium --reporter=list,json
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
-          # Consumed by the app under test, not by Playwright: the admin UI's
-          # delete-user server action needs it to remove the member the
-          # invite-acceptance specs create.
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
-          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
-          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
-          E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
-          E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
-          E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
-          E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
-          E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
-          E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
-          E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
-          E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
-          E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
+        run: npm run test:e2e -- --project=chromium --shard=${{ matrix.shard }}/2 --reporter=list,json
 
       - name: Add Playwright results to run summary
         if: ${{ always() }}
@@ -624,20 +675,38 @@ jobs:
 
       # The mutation suite (tests/mutations.spec.ts) deletes its own test event
       # through the UI, but a run that dies mid-test strands it. The suite tags
-      # every event it creates with this run's id, so this sweep deletes
-      # exactly this run's debris immediately — the old 2-hour age window could
-      # never match the very run that stranded the event. Scoped to the marker
-      # AND the admin source, so a real event can never match. The age-based
-      # blanket sweep for runs killed too hard for even `if: always()` lives in
-      # scheduled-checks.yml.
-      - name: Sweep this run's test events
+      # every event it creates with this shard's run scope, so this sweep deletes
+      # exactly this shard's debris immediately — never the sibling shard's
+      # in-flight events. Scoped to the marker AND the admin source, so a real
+      # event can never match. The age-based blanket sweep for runs killed too
+      # hard for even `if: always()` lives in scheduled-checks.yml.
+      - name: Sweep this shard's test events
         if: ${{ always() }}
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then exit 0; fi
           psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --command \
-            "with removed as (delete from muk.events where source = 'muk-events-admin' and title like 'E2E-TEST r${{ github.run_id }} %' returning id) select 'swept ' || count(*) || ' stranded test event(s)' from removed"
+            "with removed as (delete from muk.events where source = 'muk-events-admin' and title like 'E2E-TEST ${E2E_RUN_SCOPE} %' returning id) select 'swept ' || count(*) || ' stranded test event(s)' from removed"
+
+  # The required-check gate. The sharded e2e jobs render as "Playwright e2e
+  # (shard 1/2)"; this job keeps the exact "Playwright e2e" name the main
+  # ruleset requires, and passes only when every shard passed. Fail-closed: it
+  # runs `always()` and inspects needs.e2e.result, so a skipped or failed shard
+  # blocks the merge instead of silently satisfying the check.
+  e2e-gate:
+    name: Playwright e2e
+    needs: [e2e]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 5
+    steps:
+      - name: All e2e shards passed
+        run: |
+          result="${{ needs.e2e.result }}"
+          if [ "$result" != "success" ]; then
+            echo "::error::One or more Playwright e2e shards did not pass (result: $result)."
+            exit 1
+          fi
+          echo "All e2e shards passed."
 
   # ---------------------------------------------------------------------------
   # Continuous delivery. Vercel already ships the Next.js app from main via its
@@ -663,7 +732,12 @@ jobs:
   # needs: [deploy-db] edge.
   deploy-backend:
     name: Deploy migrations & edge functions (merge to main only)
-    needs: [quality, rules, migrations, e2e]
+    # No e2e here: it is PR-only now (run once per change). The main ruleset
+    # requires branches to be up to date before merging, so the squash-merged
+    # tree is exactly the one the PR's e2e shards passed against — re-running it
+    # on this push would prove nothing. quality/rules/migrations still guard the
+    # merged commit directly.
+    needs: [quality, rules, migrations]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # Running deploys self-hosted puts SUPABASE_DB_URL / SUPABASE_ACCESS_TOKEN
     # on our own hardware instead of a disposable VM — accepted 2026-07-16 to
