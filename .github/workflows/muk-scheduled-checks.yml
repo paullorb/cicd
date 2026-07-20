@@ -212,7 +212,7 @@ jobs:
       - name: Credentials are present
         id: creds
         run: |
-          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ]; then
+          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ]; then
             echo "::notice::Lighthouse credentials absent — skipping the nightly baseline."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
