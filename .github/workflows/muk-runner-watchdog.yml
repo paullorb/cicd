@@ -15,10 +15,15 @@ name: muk.events runner watchdog
 #
 # Two modes:
 #   - With the RUNNER_WATCHDOG_TOKEN secret (fine-grained PAT for this repo,
-#     Administration: read + Variables: read/write): checks whether any
-#     muk-ci runner is online and sets MUK_CI_LABELS to the self-hosted pool
-#     or ubuntu-latest accordingly. Fails (= emails the owner) whenever the
-#     pool is down, so the flip never happens silently.
+#     Administration: read + Variables: read/write — and, to auto-reroute
+#     stranded PRs, Actions: read/write): checks whether any muk-ci runner is
+#     online and sets MUK_CI_LABELS to the self-hosted pool or ubuntu-latest
+#     accordingly. When it flips to ubuntu-latest it also cancels any PR CI
+#     runs stuck in queue against the dead pool, so ci-retry.yml reruns them on
+#     the hosted label — no manual dispatch. Fails (= emails the owner)
+#     whenever the pool is down, so the flip never happens silently. If the PAT
+#     lacks Actions:write the cancel is skipped with a warning; everything else
+#     is unaffected.
 #   - Without it: cannot read runner status or write variables, so it only
 #     looks for CI runs stuck in queue and fails to raise the alarm; routing
 #     then has to be flipped by hand in Settings → Secrets and variables →
@@ -88,6 +93,39 @@ jobs:
           fi
 
           if [ "$online" -eq 0 ]; then
+            # Routing now points at ubuntu-latest, but a PR whose CI run was
+            # dispatched while the pool was dead is stuck in `queued` against the
+            # self-hosted label and will sit there forever: a queued run never
+            # reaches the `cancelled` conclusion that ci-retry.yml waits on, so
+            # nothing reruns it. Cancel those runs here — the cancel makes
+            # ci-retry rerun each one, and the rerun re-reads MUK_CI_LABELS (just
+            # flipped to hosted) and lands on ubuntu-latest. No manual dispatch.
+            #
+            # Only pull_request runs of muk's CI workflow: ci-retry rescues PR
+            # runs only, so cancelling a queued main-push run would kill its
+            # deploy with nothing to resurrect it — leave those for a returning
+            # runner or a human. The >5-min age guard skips a run that was
+            # created as the box died and might still get picked up.
+            #
+            # Cancel with the PAT, never the implicit GITHUB_TOKEN: a run
+            # cancelled by GITHUB_TOKEN does NOT emit the workflow_run event that
+            # triggers ci-retry, so the rescue would silently do nothing. This
+            # needs Actions:write on RUNNER_WATCHDOG_TOKEN (alongside its
+            # existing Administration:read + Variables:read/write). Until that
+            # scope is added the cancel 403s — warn and carry on, so routing and
+            # the alarm below are unaffected and behaviour degrades to today's
+            # (flip + manual re-run), not worse.
+            cutoff="$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=queued&event=pull_request&per_page=50" \
+              --jq ".workflow_runs[] | select(.created_at < \"$cutoff\") | .id" 2>/dev/null \
+            | while read -r run_id; do
+                [ -n "$run_id" ] || continue
+                if gh api -X POST "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/cancel" >/dev/null 2>&1; then
+                  echo "Cancelled stranded queued PR run $run_id — ci-retry will rerun it on ubuntu-latest."
+                else
+                  echo "::warning::Could not cancel queued run $run_id (RUNNER_WATCHDOG_TOKEN likely lacks Actions:write). Add that scope so stranded PRs auto-reroute; until then re-run them by hand from the Actions tab."
+                fi
+              done || true  # a failed GET must not pre-empt the alarm below
             echo "::error::No muk-ci runner online — CI is routed to ubuntu-latest and is burning paid minutes. Bring the box back; the next watchdog run (or a manual dispatch of this workflow) routes CI home."
             exit 1
           fi
