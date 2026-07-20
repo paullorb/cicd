@@ -508,10 +508,15 @@ jobs:
   #     the merge is gated on branch-up-to-date (main ruleset) instead, and
   #     deploy-backend no longer needs e2e. Halves the e2e load on the shared
   #     accounts and drops ~e2e off production delivery.
-  #   - Half the wall time. `--shard=i/2` splits the specs; each shard boots its
-  #     own server on its own port and serializes only against its own set's
-  #     e2e-prod-set-<n> group (one PR's shard-1 waits on another PR's shard-1,
-  #     never on its own shard-2). muk-browser-matrix.yml uses set 1, so it
+  #   - Half the wall time. The two shards split the specs by DURATION, not
+  #     count: playwright.config.ts keys off E2E_ACCOUNT_SET to put the heavy,
+  #     atomic mutations lifecycle (~71s, one un-splittable file) alone on set 1
+  #     and everything else on set 2 (~89s) — a balance the old count-based
+  #     `--shard` couldn't make (it stacked mutations AND invite on one shard).
+  #     Each shard boots its own server on its own port and serializes only
+  #     against its own set's e2e-prod-set-<n> group (one PR's shard-1 waits on
+  #     another PR's shard-1, never on its own shard-2). muk-browser-matrix.yml
+  #     leaves E2E_ACCOUNT_SET unset, so it runs the whole suite on set 1 and
   #     joins e2e-prod-set-1.
   e2e:
     name: Playwright e2e (shard ${{ matrix.shard }})
@@ -624,7 +629,9 @@ jobs:
         # Authenticated specs self-skip when the E2E_* secrets are absent, and
         # the app deliberately tolerates missing Supabase env (getSupabaseConfig
         # returns null), so the public rendering specs stay meaningful on forks.
-        run: npm run test:e2e -- --project=chromium --shard=${{ matrix.shard }}/2 --reporter=list,json
+        # No --shard: playwright.config.ts partitions the specs by duration via
+        # E2E_ACCOUNT_SET (mutations alone on set 1, the rest on set 2).
+        run: npm run test:e2e -- --project=chromium --reporter=list,json
 
       - name: Add Playwright results to run summary
         if: ${{ always() }}
