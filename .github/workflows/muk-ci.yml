@@ -35,6 +35,13 @@ on:
         required: true
       E2E_KIOSK_EMAIL:
         required: true
+      # Optional: the Playwright suite's invite-acceptance specs create a test
+      # member and then delete it again through the admin UI, whose delete is a
+      # Next.js server action needing the service-role client. Without the key
+      # those specs self-skip (see tests/invite.spec.ts), so it stays optional
+      # and forks keep working.
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
       # Optional: only consumed by the deploy-preview / deploy-app jobs, which
       # are themselves gated on the VERCEL_DEPLOY_ENABLED repo variable. Absent
       # until the Vercel-from-CI cutover, so keep them optional (a missing
@@ -190,11 +197,10 @@ jobs:
           fi
           npx --yes supabase@2.105.0 gen types typescript \
             --project-id "$SUPABASE_PROJECT_REF" --schema muk > /tmp/supabase.ts
-          if ! diff -u types/supabase.ts /tmp/supabase.ts; then
-            echo "::error::types/supabase.ts is stale. Run 'npm run gen:types' and commit the result."
-            exit 1
-          fi
-          echo "types/supabase.ts is up to date."
+          # The comparison lives in muk.events (scripts/ is app-owned): it names
+          # the migration that caused the drift instead of only reporting that
+          # the file is stale.
+          node scripts/check-types-drift.mjs /tmp/supabase.ts
 
   # Read-only mirror of the two deploy jobs, visible as its own green check on
   # every PR: are prod's schema AND edge functions in sync with what the repo
@@ -587,6 +593,10 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          # Consumed by the app under test, not by Playwright: the admin UI's
+          # delete-user server action needs it to remove the member the
+          # invite-acceptance specs create.
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
           E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
           E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
