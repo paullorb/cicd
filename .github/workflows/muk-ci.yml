@@ -488,10 +488,18 @@ jobs:
       # including it only audits the same page twice and attributes the redirect
       # cost to check-in.
       - name: Lighthouse CI (mobile)
+        # Score assertions remain advisory, but the following step reads the
+        # emitted assertion results and hard-fails deterministic byte budgets.
+        # A collection/action failure also leaves no results and therefore
+        # fails closed in that step.
+        continue-on-error: true
         uses: treosh/lighthouse-ci-action@3e7e23fb74242897f95c0ba9cabad3d0227b9b18 # 12.6.2
         with:
           configPath: ./lighthouserc.json
           runs: "1"
+
+      - name: Require script and total byte budgets
+        run: node scripts/assert-lighthouse-byte-budgets.mjs .lighthouseci
 
       # Keep the exact representative scores and Web Vitals on the run page.
       # The formatter also includes every non-passing assertion and all sample
@@ -651,6 +659,73 @@ jobs:
           psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --command \
             "with removed as (delete from muk.events where source = 'muk-events-admin' and title like 'E2E-TEST ${E2E_RUN_SCOPE} %' returning id) select 'swept ' || count(*) || ' stranded test event(s)' from removed"
 
+  # Dedicated PR-blocking UI projects. They are read-only against the stable
+  # admin account, so they can use extra runner capacity in parallel with the
+  # two mutation-aware e2e shards without sharing a mutable fixture. Keeping
+  # them separate prevents broad visual snapshots and touch emulation from
+  # multiplying the weekly Firefox/WebKit matrix.
+  ui:
+    name: Playwright UI (${{ matrix.name }})
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mobile touch
+            project: mobile-chromium
+            port: "3102"
+          - name: visual regression
+            project: visual-chromium
+            port: "3103"
+    env:
+      E2E_PORT: ${{ matrix.port }}
+      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+      PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-ui-results.json"
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+      E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+    steps:
+      - name: Required UI-test secrets are present
+        run: |
+          missing=""
+          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
+                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL; do
+            eval "value=\${$name:-}"
+            [ -n "$value" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — the authenticated UI project would skip and prove nothing."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Free the UI-test port
+        shell: bash
+        run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
+
+      - name: Run ${{ matrix.name }} tests
+        run: npm run test:e2e -- --project=${{ matrix.project }} --reporter=list,json
+
+      - name: Add Playwright results to run summary
+        if: ${{ always() }}
+        run: node scripts/write-ci-summary.mjs playwright .playwright-ui-results.json
+
   # The required-check gate. The sharded e2e jobs render as "Playwright e2e
   # (shard 1/2)"; this job keeps the exact "Playwright e2e" name the main
   # ruleset requires, and passes only when every shard passed. Fail-closed: it
@@ -658,19 +733,20 @@ jobs:
   # blocks the merge instead of silently satisfying the check.
   e2e-gate:
     name: Playwright e2e
-    needs: [e2e]
+    needs: [e2e, ui]
     if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
     steps:
       - name: All e2e shards passed
         run: |
-          result="${{ needs.e2e.result }}"
-          if [ "$result" != "success" ]; then
-            echo "::error::One or more Playwright e2e shards did not pass (result: $result)."
+          e2e_result="${{ needs.e2e.result }}"
+          ui_result="${{ needs.ui.result }}"
+          if [ "$e2e_result" != "success" ] || [ "$ui_result" != "success" ]; then
+            echo "::error::One or more Playwright jobs did not pass (e2e: $e2e_result, UI: $ui_result)."
             exit 1
           fi
-          echo "All e2e shards passed."
+          echo "All e2e shards, mobile touch tests, and visual regressions passed."
 
   # ---------------------------------------------------------------------------
   # Continuous delivery. Vercel already ships the Next.js app from main via its
@@ -785,7 +861,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-preview:
     name: Deploy app to Vercel (preview — PRs only)
-    needs: [quality, rules, migrations, e2e]
+    needs: [quality, rules, migrations, perf, e2e-gate]
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
