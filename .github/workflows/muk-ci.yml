@@ -462,7 +462,17 @@ jobs:
           for f in supabase/migrations/*.sql; do
             base=$(basename "$f")
             if grep -qxF "$base" scripts/ci-db-replay-skip.txt; then
-              echo "skipped $base (another app's migration, see the skip list)"
+              # A skipped migration with a same-named file in
+              # scripts/ci-db-replay-overrides/ is replaced by that muk-only
+              # twin at its own ledger position (see the override's header) —
+              # skipping a mixed-app original wholesale would silently lose
+              # its muk-side policy rewrites from the scratch schema.
+              if [ -f "scripts/ci-db-replay-overrides/$base" ]; then
+                echo "applying muk-only override for $base"
+                psql "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q -f "scripts/ci-db-replay-overrides/$base"
+              else
+                echo "skipped $base (another app's migration, see the skip list)"
+              fi
               continue
             fi
             echo "applying $base"
@@ -483,6 +493,28 @@ jobs:
       - name: RLS scoping holds on the freshly-built schema
         shell: bash
         run: psql "$SCRATCH_DB" --no-psqlrc -v ON_ERROR_STOP=1 -f scripts/assert-rls-scoping.sql
+
+      # The integration tier (tests/integration/*.sql): permission/RLS boundary
+      # tests migrated out of the Playwright e2e suite, run against the scratch
+      # schema this job just built. Each file seeds its own fixtures,
+      # impersonates JWT identities the way PostgREST supplies them (SET ROLE
+      # authenticated + request.jwt.claim.*), asserts with DO blocks and rolls
+      # back — so an RLS/guard-trigger regression fails at PR time on the exact
+      # schema the PR builds, with no live Supabase and no seeded prod
+      # accounts. `npm run test:integration` is the local equivalent.
+      - name: DB integration tests (RLS/permission boundaries)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(tests/integration/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no tests/integration/*.sql files in this checkout — nothing to run"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            echo "running $f"
+            psql "$SCRATCH_DB" --no-psqlrc -v ON_ERROR_STOP=1 -q -f "$f"
+          done
 
       - name: Drop the scratch database
         if: ${{ always() }}
