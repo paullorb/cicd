@@ -71,11 +71,21 @@ env:
 # timeout-minutes on every job is not optional here: a hung job on a
 # self-hosted runner holds one of the machine's few slots for the default
 # 6 hours.
+#
+# Dependabot PRs run on ubuntu-latest, not the muk-ci pool: a dependency bump
+# is the one PR whose code nobody wrote — a malicious package could target the
+# persistent Mac Studio (and the mirrored Dependabot secrets) from an install
+# script or a test. Hosted VMs are disposable, so that blast radius dies with
+# the job. This is the same execution path as the runner-watchdog hosted
+# fallback, so it needs no extra maintenance. Belt-and-braces with this,
+# `npm ci --ignore-scripts` below keeps lifecycle scripts from running on ANY
+# PR (verified 2026-07-22: check + build + e2e need no install scripts;
+# Playwright browsers install in their own explicit step).
 
 jobs:
   quality:
     name: Lint, typecheck, edge functions & build
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -90,7 +100,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # `npm audit` is NOT run here. As a step in this required job it would fail
       # every PR and every main push the moment a new advisory is published for a
@@ -106,9 +116,75 @@ jobs:
       - name: Build
         run: npm run build
 
+  # Shift-left secret detection. The pipeline's orbit holds a service-role key,
+  # the prod DB URL, a PAT and push keys; a credential committed today would
+  # otherwise land on main unnoticed (the repo is private without Advanced
+  # Security, so GitHub itself scans nothing). Full history was verified clean
+  # on 2026-07-22 (429 commits), so this runs blocking with no baseline config.
+  # No secrets needed, so it runs identically on forks and Dependabot PRs.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Scan history, not just the tip: a secret committed and then
+          # "removed" in a follow-up commit is still in every clone.
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Comments need pull-requests: write; the failed check plus the job
+          # log is signal enough, keep the token read-only.
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  # Shift-left half of the dependency story. The nightly audit in
+  # muk-scheduled-checks.yml catches advisories published for dependencies we
+  # already ship (see the note in the quality job for why that cannot block
+  # PRs); this job blocks the other direction — a PR *introducing* a
+  # known-vulnerable production dependency. It audits only when the PR touches
+  # the lockfile, so an advisory published mid-flight can never wedge unrelated
+  # PRs: they skip the audit step and the check stays green.
+  deps-audit:
+    name: Dependency audit (lockfile PRs)
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Needed to diff against the PR base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Audit production dependencies when the lockfile changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ! git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qx 'package-lock.json'; then
+            echo "package-lock.json untouched — no new dependencies to audit."
+            exit 0
+          fi
+          # Known limitation, accepted: this flags pre-existing high advisories
+          # too, not only ones this PR introduces. Such an advisory would have
+          # failed the nightly audit within a day anyway — fixing it unblocks
+          # both alarms at once.
+          npm audit --omit=dev --audit-level=high
+
   rules:
     name: Project rules
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       # Every secret-gated step below self-skips when its secret is absent
@@ -214,7 +290,7 @@ jobs:
   sync:
     name: Prod sync (migrations & edge functions)
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       # See the identical step in the rules job.
@@ -280,7 +356,7 @@ jobs:
   # shared ledger) are skipped, exactly as `supabase db push` skips them.
   migrations:
     name: Migrations replay (scratch Postgres)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     env:
       SCRATCH_DB: muk_ci_${{ github.run_id }}_${{ github.run_attempt }}
@@ -393,8 +469,9 @@ jobs:
   # throttling — the old desktop pass asserted the same deterministic byte
   # budgets without the throttling, so it added runtime without adding signal.
   #
-  # NOT a required check (not in the branch ruleset): a blown budget turns the
-  # run red for a human to look at, but auto-merge never waits on it.
+  # NOTE: despite earlier plans to keep this advisory, the "main protection"
+  # ruleset DOES list "CI/CD / Lighthouse budget (mobile)" as a required check
+  # (verified 2026-07-22), so a blown byte budget blocks auto-merge.
   #
   # PR-only. A squash-merge lands the exact tree the PR run already audited, so
   # re-running Lighthouse on the main push produced no new signal while holding
@@ -417,7 +494,7 @@ jobs:
     # Internal PRs only: forked PRs get no repository secrets, and the main push
     # would only re-audit the tree the PR run just did (see the note above).
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     # :3200 is one port on a shared machine — one Lighthouse at a time across
     # all runs, queued not cancelled, exactly like the e2e-prod group (same
     # rare oldest-pending-cancelled caveat with three runs racing).
@@ -446,7 +523,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build
@@ -529,7 +606,7 @@ jobs:
   e2e:
     name: Playwright e2e (shard ${{ matrix.shard }})
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -620,7 +697,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
@@ -667,7 +744,7 @@ jobs:
   ui:
     name: Playwright UI (${{ matrix.name }})
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -710,7 +787,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
@@ -735,7 +812,7 @@ jobs:
     name: Playwright e2e
     needs: [e2e, ui]
     if: ${{ always() && github.event_name == 'pull_request' }}
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
     steps:
       - name: All e2e shards passed
@@ -785,6 +862,10 @@ jobs:
     # under one user. Revisit when hardening (docs/self-hosted-runners.md).
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # For the DORA deployment record below.
+      deployments: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -842,6 +923,20 @@ jobs:
           fi
           supabase functions deploy --project-ref "$SUPABASE_PROJECT_REF"
 
+      # DORA instrumentation: one GitHub Deployment per backend deploy, so
+      # deployment frequency and lead time are queryable from the API instead
+      # of reconstructed from run logs. The nightly DORA summary in
+      # muk-scheduled-checks.yml reads these. Reached only when every deploy
+      # step above succeeded, so a record always means "this landed".
+      - name: Record deployment (DORA)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '{"ref":"%s","environment":"production-backend","auto_merge":false,"required_contexts":[],"description":"Supabase migrations + edge functions"}' "$GITHUB_SHA" \
+            | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id"
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+            -f state=success -f description="Deployed by run $GITHUB_RUN_ID"
+
   # ---------------------------------------------------------------------------
   # Frontend delivery, gated on CI. Historically Vercel's own git integration
   # shipped the Next.js app straight off a push — for BOTH preview and
@@ -866,7 +961,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       vars.VERCEL_DEPLOY_ENABLED == 'true'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -903,6 +998,10 @@ jobs:
       vars.VERCEL_DEPLOY_ENABLED == 'true'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # For the DORA deployment record below.
+      deployments: write
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -923,3 +1022,15 @@ jobs:
             exit 1
           fi
           npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+
+      # DORA instrumentation: this is THE user-facing production deploy, so the
+      # "production" environment record lives here (deploy-backend records
+      # "production-backend"). The nightly DORA summary counts these.
+      - name: Record deployment (DORA)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"Next.js app on Vercel"}' "$GITHUB_SHA" \
+            | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id"
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+            -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
