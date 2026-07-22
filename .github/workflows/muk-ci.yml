@@ -128,6 +128,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # gitleaks-action lists the PR's commits to compute its scan range;
+      # without this the API call 403s and the job dies before scanning.
+      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
