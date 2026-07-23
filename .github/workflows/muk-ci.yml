@@ -813,6 +813,18 @@ jobs:
           - name: visual regression
             project: visual-chromium
             port: "3103"
+    # Each variant binds a FIXED port on a shared machine, so two runs of the
+    # same variant — two PRs in flight, or a push racing a PR — would fight
+    # over it. Worse than a bind error: the "free the port" step below is
+    # `lsof -ti :$E2E_PORT | xargs kill`, so the second job would kill the
+    # first job's server mid-suite and the victim would fail with an
+    # inexplicable connection error somewhere unrelated. Queue per port,
+    # exactly like the e2e shards queue per account set. Not cancel-in-progress:
+    # a half-killed Playwright run leaves the port and browser processes behind,
+    # which is the situation this exists to prevent.
+    concurrency:
+      group: muk-ui-${{ matrix.port }}
+      cancel-in-progress: false
     env:
       E2E_PORT: ${{ matrix.port }}
       PLAYWRIGHT_SKIP_BROWSER_GC: "1"
