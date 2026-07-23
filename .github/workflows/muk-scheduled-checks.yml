@@ -185,19 +185,22 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
-  # The stable Lighthouse baseline. The per-PR job in muk-ci.yml runs a single
-  # sample for fast feedback (the hard byte budgets are deterministic anyway);
-  # this nightly run takes three samples so the advisory scores and Web Vitals
-  # have a low-noise baseline — the signal the old 3-sample main-push run gave,
-  # without holding a third of the shared runner pool on every merge. Advisory:
-  # a blown budget here emails the owner to look, exactly like the other
-  # canaries. Self-skips if the credentials are absent, so a minimal caller
+  # The full Lighthouse audit — and, since the per-PR perf job was retired, its
+  # sole enforcing home. muk-ci.yml's PR gate is now a fast, deterministic
+  # bundle-size check (no Chrome); the timing-sensitive scores that flaked under
+  # runner contention moved HERE, where three samples run on an idle box at
+  # 03:17 and the measurement is trustworthy. The assert step below hard-fails
+  # this job on a blown network byte budget or an error-level category score
+  # (performance ≥ 0.9, a11y/best-practices/seo = 1), which emails the owner —
+  # the same next-morning alert as the drift/advisor/audit canaries, off the
+  # merge path. Self-skips if the credentials are absent, so a minimal caller
   # stays valid.
   lighthouse:
     name: Lighthouse baseline (mobile, 3 samples)
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    # Shares the :3200 port and the single-Lighthouse-at-a-time discipline with
-    # muk-ci.yml's perf job — one run of either at a time across the machine.
+    # Owns the :3200 port and the single-Lighthouse-at-a-time discipline now
+    # that muk-ci.yml's perf job is gone; the `lighthouse` concurrency group
+    # still serializes it against any manual workflow_dispatch re-run.
     concurrency:
       group: lighthouse
       cancel-in-progress: false
@@ -260,11 +263,26 @@ jobs:
         run: lsof -ti :"$LIGHTHOUSE_PORT" | xargs kill 2>/dev/null || true
 
       - name: Lighthouse CI (mobile, 3 samples)
+        # Advisory at the action level; the assert step below is the gate, so a
+        # score/budget breach fails through the detailed breakdown rather than
+        # the action's terse exit — mirroring the pattern the retired per-PR
+        # perf job used in muk-ci.yml.
+        continue-on-error: true
         if: steps.creds.outputs.ok == 'true'
         uses: treosh/lighthouse-ci-action@3e7e23fb74242897f95c0ba9cabad3d0227b9b18 # 12.6.2
         with:
           configPath: ./lighthouserc.json
           runs: "3"
+
+      # This is where the full Lighthouse contract is now ENFORCED, on the idle
+      # nightly box instead of the busy PR path: the deterministic network byte
+      # budgets AND every error-level category score in lighthouserc.json
+      # (performance ≥ 0.9, a11y/best-practices/seo = 1). A failure fails this
+      # nightly job, which emails the owner — the same alert as the drift,
+      # advisor and audit canaries. Fails closed if the action collected nothing.
+      - name: Require byte budgets and category scores
+        if: steps.creds.outputs.ok == 'true'
+        run: node scripts/assert-lighthouse-byte-budgets.mjs .lighthouseci
 
       - name: Add Lighthouse results to run summary
         if: ${{ always() && steps.creds.outputs.ok == 'true' }}
