@@ -22,6 +22,16 @@ on:
         required: false
         default: App
         type: string
+      app_id:
+        description: Optional bundle/application ID to verify in compiled output.
+        required: false
+        default: ""
+        type: string
+      display_name:
+        description: Optional launcher display name to verify in compiled output.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -48,9 +58,24 @@ jobs:
           npm ci
           npx cap sync android
 
-      - name: Build unsigned Android App Bundle
+      - name: Build unsigned Android artifacts
         working-directory: android
-        run: ./gradlew --no-daemon bundleRelease
+        run: ./gradlew --no-daemon assembleRelease bundleRelease
+
+      - name: Verify Android identity
+        if: inputs.app_id != '' || inputs.display_name != ''
+        env:
+          EXPECTED_APP_ID: ${{ inputs.app_id }}
+          EXPECTED_DISPLAY_NAME: ${{ inputs.display_name }}
+        run: |
+          manifest=$("$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt" \
+            dump badging android/app/build/outputs/apk/release/app-release-unsigned.apk)
+          if [ -n "$EXPECTED_APP_ID" ]; then
+            echo "$manifest" | grep -Fq "package: name='$EXPECTED_APP_ID'"
+          fi
+          if [ -n "$EXPECTED_DISPLAY_NAME" ]; then
+            echo "$manifest" | grep -Fq "application-label:'$EXPECTED_DISPLAY_NAME'"
+          fi
 
       - name: Upload Android bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,6 +111,22 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/App-unsigned.xcarchive" \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Verify iOS identity
+        if: inputs.app_id != '' || inputs.display_name != ''
+        env:
+          EXPECTED_APP_ID: ${{ inputs.app_id }}
+          EXPECTED_DISPLAY_NAME: ${{ inputs.display_name }}
+        run: |
+          app_plist="$RUNNER_TEMP/App-unsigned.xcarchive/Products/Applications/App.app/Info.plist"
+          if [ -n "$EXPECTED_APP_ID" ]; then
+            actual_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app_plist")
+            test "$actual_id" = "$EXPECTED_APP_ID"
+          fi
+          if [ -n "$EXPECTED_DISPLAY_NAME" ]; then
+            actual_name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$app_plist")
+            test "$actual_name" = "$EXPECTED_DISPLAY_NAME"
+          fi
 
       - name: Upload iOS archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
