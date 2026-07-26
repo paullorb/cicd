@@ -18,10 +18,15 @@ the secrets its workflow requires.
 | `muk-sync-events.yml` | muk.events | hourly and manual |
 | `muk-runner-watchdog.yml` | muk.events | every six hours and manual |
 | `app-ci.yml` | paullorber | pull requests and pushes to `main` |
+| `app-vercel.yml` | generic apps | Vercel preview and production delivery |
+| `app-native-build.yml` | generic Capacitor apps | unsigned iOS and Android release artifacts |
+| `app-content-check-probe.yml` | generic apps | path-scoped, secret-bearing PR comment proof |
 
-`app-ci.yml` is the generic entry point for a Next.js app with Supabase
-migrations (lint, audit, build, migration replay; no secrets). New repos
-should start there and only get a bespoke workflow when they outgrow it.
+`app-ci.yml` is the generic entry point for a Next.js app (lint, audit, build,
+and migration replay when migrations exist; no secrets). New repos should
+start there and compose the additive deploy, native, or content-check
+workflows they need. A bespoke product workflow is the exception, not the
+onboarding path.
 
 The small caller workflows remain in each application repository because
 GitHub events and schedules belong to the caller. `actions/checkout` inside a
@@ -65,10 +70,14 @@ archive in every cache-enabled job.
 ## Adding a repository
 
 1. Point a small caller workflow in the app repo at `app-ci.yml@<SHA>`.
-2. If the app needs env/secrets in CI, add `workflow_call` inputs/secrets to
-   `app-ci.yml` (or give the repo its own `<repo>-ci.yml`) — don't grow
-   implicit environment assumptions.
-3. Migration replays support two optional per-repo files:
+2. Pass the caller's Node version file when it is not `.node-version`.
+3. Compose `app-vercel.yml` for isolated Vercel delivery and
+   `app-native-build.yml` for Capacitor artifacts. Secrets stay in the caller
+   repository and are passed explicitly.
+4. Keep event and path filters in the caller. A path-scoped caller can invoke
+   `app-content-check-probe.yml`; its `expected_repository` guard prevents an
+   accidental cross-project invocation.
+5. Migration replays support two optional per-repo files:
    `scripts/ci-db-shim.sql` (objects that predate the migrations) and
    `scripts/ci-db-replay-skip.txt` (files recorded in a shared ledger but
    owned by another repo).

@@ -7,7 +7,13 @@ name: App CI
 # workflow_call inputs/secrets here when a caller actually needs them.
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      node_version_file:
+        description: Node version file owned by the caller repository.
+        required: false
+        default: .node-version
+        type: string
 
 permissions:
   contents: read
@@ -28,7 +34,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           # The app repo owns its Node version.
-          node-version-file: .node-version
+          node-version-file: ${{ inputs.node_version_file }}
 
       - name: Install dependencies
         run: npm ci
@@ -70,8 +76,8 @@ jobs:
           shopt -s nullglob
           files=(supabase/migrations/*.sql)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::no files in supabase/migrations/ — this job should not be enabled for a repo without migrations"
-            exit 1
+            echo "No Supabase migrations yet — nothing to replay."
+            exit 0
           fi
           psql postgres -v ON_ERROR_STOP=1 -qc "create database \"$SCRATCH_DB\""
           # Optional per-repo scaffolding, mirroring muk-ci.yml: a shim for
