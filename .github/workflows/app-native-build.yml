@@ -32,12 +32,30 @@ on:
         required: false
         default: ""
         type: string
+      build_android:
+        description: >-
+          Build the Android bundle. Defaults to true so existing callers are
+          unaffected. Set false when the caller repository has no `android/`
+          directory: `npx cap sync android` does not create a missing platform
+          (only `cap add` does), so the job would fail on checkout rather than
+          skip.
+        required: false
+        default: true
+        type: boolean
+      build_ios:
+        description: >-
+          Build the iOS archive. Same contract as `build_android`, so a caller
+          can ship one platform without carrying the other's scaffolding.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
   android:
+    if: inputs.build_android
     name: Build Android release bundle, unsigned
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -86,6 +104,7 @@ jobs:
           retention-days: 14
 
   ios:
+    if: inputs.build_ios
     name: Build iOS release archive, unsigned
     runs-on: macos-15
     timeout-minutes: 30

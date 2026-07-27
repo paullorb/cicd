@@ -19,7 +19,7 @@ the secrets its workflow requires.
 | `muk-runner-watchdog.yml` | muk.events | every six hours and manual |
 | `app-ci.yml` | paullorber | pull requests and pushes to `main` |
 | `app-vercel.yml` | generic apps | Vercel preview and production delivery |
-| `app-native-build.yml` | generic Capacitor apps | unsigned iOS and Android release artifacts |
+| `app-native-build.yml` | generic Capacitor apps | unsigned iOS and Android release artifacts; `build_ios` / `build_android` select platforms |
 | `app-content-check-probe.yml` | generic apps | path-scoped, secret-bearing PR comment proof |
 
 `app-ci.yml` is the generic entry point for a Next.js app (lint, audit, build,
