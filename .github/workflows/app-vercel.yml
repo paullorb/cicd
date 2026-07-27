@@ -13,6 +13,10 @@ on:
         required: false
         default: .node-version
         type: string
+      vercel_scope:
+        description: Vercel team slug used by the CLI scope flag.
+        required: true
+        type: string
     secrets:
       VERCEL_TOKEN:
         required: true
@@ -36,6 +40,7 @@ jobs:
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_SCOPE: ${{ inputs.vercel_scope }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -53,12 +58,12 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           npx --yes "vercel@$VERCEL_CLI_VERSION" pull \
-            --yes --environment=preview --scope "$VERCEL_ORG_ID" \
+            --yes --environment=preview --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN"
           npx --yes "vercel@$VERCEL_CLI_VERSION" build \
-            --scope "$VERCEL_ORG_ID" --token "$VERCEL_TOKEN"
+            --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --yes --scope "$VERCEL_ORG_ID" \
+            --prebuilt --yes --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel preview" >> "$GITHUB_STEP_SUMMARY"
@@ -72,6 +77,7 @@ jobs:
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_SCOPE: ${{ inputs.vercel_scope }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -89,12 +95,12 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           npx --yes "vercel@$VERCEL_CLI_VERSION" pull \
-            --yes --environment=production --scope "$VERCEL_ORG_ID" \
+            --yes --environment=production --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN"
           npx --yes "vercel@$VERCEL_CLI_VERSION" build \
-            --prod --scope "$VERCEL_ORG_ID" --token "$VERCEL_TOKEN"
+            --prod --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --prod --yes --scope "$VERCEL_ORG_ID" \
+            --prebuilt --prod --yes --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel production" >> "$GITHUB_STEP_SUMMARY"
