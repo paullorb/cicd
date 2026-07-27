@@ -63,7 +63,7 @@ jobs:
           npx --yes "vercel@$VERCEL_CLI_VERSION" build \
             --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --yes --scope "$VERCEL_SCOPE" \
+            --prebuilt --yes --target=preview --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel preview" >> "$GITHUB_STEP_SUMMARY"
