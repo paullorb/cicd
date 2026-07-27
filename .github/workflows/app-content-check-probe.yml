@@ -1,0 +1,89 @@
+name: App content-check probe
+
+# Phase-1 proof for a future AI content-review job. Path filtering belongs in
+# the caller because GitHub events belong to the caller repository. This
+# reusable half verifies that a repository-scoped secret arrived and posts an
+# idempotent PR verdict without exposing the secret.
+
+on:
+  workflow_call:
+    inputs:
+      expected_repository:
+        description: Exact owner/repository allowed to invoke this probe.
+        required: true
+        type: string
+      watched_path:
+        description: Human-readable path shown in the probe verdict.
+        required: true
+        type: string
+    secrets:
+      CONTENT_CHECK_PROBE_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Confirm path-scoped secret-bearing PR job
+    if: github.event_name == 'pull_request' && github.repository == inputs.expected_repository
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Verify repository-scoped secret is available
+        shell: bash
+        env:
+          CONTENT_CHECK_PROBE_TOKEN: ${{ secrets.CONTENT_CHECK_PROBE_TOKEN }}
+        run: |
+          if [ -z "$CONTENT_CHECK_PROBE_TOKEN" ]; then
+            echo "::error::CONTENT_CHECK_PROBE_TOKEN was not provided by the caller repository."
+            exit 1
+          fi
+          echo "Repository-scoped probe secret received; value remains masked."
+
+      - name: Post or update the probe verdict
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          WATCHED_PATH: ${{ inputs.watched_path }}
+        with:
+          script: |
+            const marker = "<!-- app-content-check-probe -->";
+            const body = [
+              marker,
+              "### content-check infrastructure probe",
+              "",
+              `Passed for \`${process.env.WATCHED_PATH}\`.`,
+              "",
+              "The path-scoped caller invoked the shared workflow, supplied its repository-scoped probe secret, and received permission to post this PR verdict.",
+            ].join("\n");
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                per_page: 100,
+              },
+            );
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.type === "Bot" &&
+                comment.body?.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
