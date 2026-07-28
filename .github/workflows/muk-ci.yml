@@ -55,6 +55,24 @@ on:
       # and forks keep working.
       SUPABASE_SERVICE_ROLE_KEY:
         required: false
+      # Optional, and not a secret in any real sense — this is the VAPID PUBLIC
+      # key, which every browser receives in the client bundle. It is passed
+      # like one because that is how the caller already stores its
+      # NEXT_PUBLIC_* build values.
+      #
+      # It is a BUILD input, not a test credential: components/push-toggle.tsx
+      # renders nothing at all unless pushSupported() is true, and that needs
+      # this key baked in. Without it the entire notification row — the
+      # per-device switch and the per-account category chooser — is absent from
+      # the app under test, so no Playwright project can reach it. That is why
+      # the switch shipped in muk#282 never had e2e coverage.
+      #
+      # required: false so callers that do not use Web Push (and forks) keep
+      # working. muk's own specs assert the row directly rather than leaning on
+      # a presence check here, so a key that goes missing fails loudly in the
+      # suite instead of quietly reducing it.
+      NEXT_PUBLIC_VAPID_PUBLIC_KEY:
+        required: false
       # Optional: only consumed by the deploy-preview / deploy-app jobs, which
       # are themselves gated on the VERCEL_DEPLOY_ENABLED repo variable. Absent
       # until the Vercel-from-CI cutover, so keep them optional (a missing
@@ -608,6 +626,9 @@ jobs:
       # E2E_ACCOUNT_SET — so sharding needs no extra secrets.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      # Baked into the build, so the notification row exists to be tested at
+      # all. See the secrets block for why this public key is passed like one.
+      NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       # Consumed by the app under test, not Playwright: the admin UI's
       # delete-user server action needs it to remove the member the
@@ -735,6 +756,11 @@ jobs:
       PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-ui-results.json"
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      # Same build input as the e2e shards. These two projects do not drive the
+      # notification row today, but they must render the same app the shards
+      # do: a build that differs from the one the baselines were captured
+      # against is how a visual project starts disagreeing with local runs.
+      NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
       E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
       E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
       E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
