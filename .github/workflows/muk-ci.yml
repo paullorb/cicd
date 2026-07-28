@@ -2,6 +2,19 @@ name: muk.events CI
 
 on:
   workflow_call:
+    inputs:
+      # An input rather than a constant here, because a constant here is a
+      # constant the caller cannot see. It used to be one, and when muk moved to
+      # its own Frankfurt project on 2026-07-28 the cutover updated every
+      # reference in muk.events and could not update this one — leaving
+      # `functions deploy` and the generated-types check pointed at the
+      # abandoned project, silently, with both still green. Now the ref lives
+      # next to the docs that describe it and the scripts that share it, where
+      # one repo's test can hold them together.
+      supabase_project_ref:
+        description: Supabase project the schema, functions and types belong to.
+        required: true
+        type: string
     secrets:
       NEXT_PUBLIC_SUPABASE_URL:
         required: true
@@ -58,7 +71,7 @@ permissions:
 
 env:
   # Not a secret: the project ref is already recorded in supabase/MIGRATIONS.md.
-  SUPABASE_PROJECT_REF: dtuisqhdkomdvbxzzifu
+  SUPABASE_PROJECT_REF: ${{ inputs.supabase_project_ref }}
 
 # Every job runs on the self-hosted muk-ci pool by default — GitHub-hosted
 # minutes were about to breach the plan cap. The labels come from the

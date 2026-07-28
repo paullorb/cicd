@@ -12,6 +12,12 @@ name: muk.events scheduled checks
 
 on:
   workflow_call:
+    inputs:
+      # See the identical input in muk-ci.yml for why this is not a constant.
+      supabase_project_ref:
+        description: Supabase project the schema, functions and types belong to.
+        required: true
+        type: string
     secrets:
       SUPABASE_DB_URL:
         required: true
@@ -34,7 +40,7 @@ permissions:
   contents: read
 
 env:
-  SUPABASE_PROJECT_REF: dtuisqhdkomdvbxzzifu
+  SUPABASE_PROJECT_REF: ${{ inputs.supabase_project_ref }}
 
 # All three jobs run on the self-hosted muk-ci pool (routed via MUK_CI_LABELS,
 # like ci.yml). If the runner box is down, runner-watchdog.yml re-routes them
