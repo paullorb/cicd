@@ -21,6 +21,15 @@ on:
         required: false
       SUPABASE_DB_URL:
         required: true
+      # Optional, exactly as in muk-ci.yml: the invite-acceptance,
+      # access-request and password-reset completion specs create a real
+      # (test-flagged) member and delete it again through the admin UI, whose
+      # delete is a Next.js server action needing the service-role client.
+      # Without the key those five specs self-skip, so this suite was checking
+      # 43 of the 48 specs the PR shards check. required: false keeps forks and
+      # any other caller working.
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
       E2E_ADMIN_NAME:
         required: true
       E2E_ADMIN_PASSWORD:
@@ -95,6 +104,7 @@ jobs:
           E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
           E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
           E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           missing=""
           for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
@@ -109,6 +119,12 @@ jobs:
           if [ -n "$missing" ]; then
             echo "::error::Missing secret(s):$missing — the authenticated suites would self-skip and this canary would silently prove nothing."
             exit 1
+          fi
+          # Optional (see the secrets block), so this warns rather than fails —
+          # but it must not pass unremarked: five specs self-skipping is exactly
+          # the quiet loss of coverage this step exists to make visible.
+          if [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "::warning::SUPABASE_SERVICE_ROLE_KEY is absent — the invite-acceptance, access-request and password-reset completion specs will self-skip, so this run checks 43 of 48 specs."
           fi
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -137,6 +153,11 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
+          # Read by the app under test, not by Playwright: the admin UI's
+          # delete-user server action needs the service-role client to remove
+          # the member the completion specs create. Playwright reads it too,
+          # but only to decide whether those specs may run at all.
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
           E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
           E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
