@@ -15,6 +15,28 @@ on:
         description: Supabase project the schema, functions and types belong to.
         required: true
         type: string
+      # The five account-lifecycle specs (invite acceptance, access-request and
+      # password-reset completion) self-skip without SUPABASE_SERVICE_ROLE_KEY,
+      # because without it their cleanup is impossible. Right for a fork; too
+      # permissive for a repo that DOES provide the key, where a deleted or
+      # renamed secret would silently shrink the desktop suite from 48 to 43
+      # cases with only a log warning to show for it. A caller that sets this
+      # promises the key exists, and the e2e preflight fails when it is absent.
+      require_service_role_e2e:
+        default: false
+        required: false
+        type: boolean
+      # tests/integration/*.sql being EMPTY passes the migrations-replay job by
+      # default (matching a fresh caller with no SQL tier yet). A caller that
+      # has the tier sets this to false — deleting all its files then fails the
+      # required check instead of presenting a green "Migrations replay" that
+      # replays the schema but asserts nothing about it. The local runner
+      # (scripts/test-integration.mjs) already failed on the empty glob; this
+      # closes the same door in CI.
+      allow_empty_integration_tests:
+        default: true
+        required: false
+        type: boolean
     secrets:
       NEXT_PUBLIC_SUPABASE_URL:
         required: true
@@ -552,8 +574,12 @@ jobs:
           shopt -s nullglob
           files=(tests/integration/*.sql)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "no tests/integration/*.sql files in this checkout — nothing to run"
-            exit 0
+            if [ "${{ inputs.allow_empty_integration_tests }}" = "true" ]; then
+              echo "no tests/integration/*.sql files in this checkout — nothing to run"
+              exit 0
+            fi
+            echo "::error::tests/integration/ holds no .sql files, but this caller sets allow_empty_integration_tests: false. The replay job would go green while asserting nothing about the schema it built."
+            exit 1
           fi
           for f in "${files[@]}"; do
             echo "running $f"
@@ -655,12 +681,19 @@ jobs:
       - name: Required secrets are present
         run: |
           missing=""
-          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
-                      SUPABASE_DB_URL \
-                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
-                      E2E_STAFF_NAME E2E_STAFF_PASSWORD E2E_STAFF_EMAIL \
-                      E2E_TOGGLE_NAME E2E_TOGGLE_PASSWORD E2E_TOGGLE_EMAIL \
-                      E2E_KIOSK_NAME E2E_KIOSK_PASSWORD E2E_KIOSK_EMAIL; do
+          names="NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
+                 SUPABASE_DB_URL \
+                 E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
+                 E2E_STAFF_NAME E2E_STAFF_PASSWORD E2E_STAFF_EMAIL \
+                 E2E_TOGGLE_NAME E2E_TOGGLE_PASSWORD E2E_TOGGLE_EMAIL \
+                 E2E_KIOSK_NAME E2E_KIOSK_PASSWORD E2E_KIOSK_EMAIL"
+          # See the require_service_role_e2e input: the five account-lifecycle
+          # specs self-skip without the key, and this caller has said that is a
+          # failure, not a smaller suite.
+          if [ "${{ inputs.require_service_role_e2e }}" = "true" ]; then
+            names="$names SUPABASE_SERVICE_ROLE_KEY"
+          fi
+          for name in $names; do
             eval "value=\${$name:-}"
             [ -n "$value" ] || missing="$missing $name"
           done
@@ -981,9 +1014,7 @@ jobs:
             echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. Add the Vercel token and the org/project IDs as secrets, or unset the variable."
             exit 1
           fi
-          # Pin the CLI once a version is chosen; @latest keeps this inert path
-          # from breaking on a stale pin before cutover.
-          url=$(npx --yes vercel@latest deploy --yes --token "$VERCEL_TOKEN")
+          url=$(npx --yes vercel@58.4.4 deploy --yes --token "$VERCEL_TOKEN")
           echo "Preview deployed: $url"
           printf '### Vercel preview\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1020,7 +1051,29 @@ jobs:
             echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. A production deploy that cannot authenticate is a failed deploy, not a green one."
             exit 1
           fi
-          npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+          npx --yes vercel@58.4.4 deploy --prod --yes --token "$VERCEL_TOKEN"
+
+      # The CLI returning is not the same thing as the site serving this build:
+      # an alias/custom-domain slip or a stale edge would be recorded below as
+      # a successful production deployment of a commit the domain never served
+      # (the deploy above targets whatever www.muk.events is aliased to, and
+      # /api/version is force-dynamic + no-store precisely so this probe cannot
+      # be answered from a cache). Poll until the domain reports this run's
+      # commit; three minutes is generous — alias flips are usually seconds.
+      - name: Verify www.muk.events serves this commit
+        run: |
+          for _ in $(seq 1 36); do
+            served=$(curl -fsS --max-time 10 https://www.muk.events/api/version | \
+              sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p') || served=""
+            if [ "$served" = "$GITHUB_SHA" ]; then
+              echo "www.muk.events serves $served"
+              exit 0
+            fi
+            echo "www.muk.events serves ${served:-nothing} — waiting for $GITHUB_SHA"
+            sleep 5
+          done
+          echo "::error::www.muk.events never served $GITHUB_SHA — the deploy returned success but the custom domain still answers with another build. Not recording a successful deployment."
+          exit 1
 
       # DORA instrumentation: this is THE user-facing production deploy, so the
       # "production" environment record lives here (deploy-backend records
