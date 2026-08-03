@@ -70,6 +70,20 @@ on:
         required: true
       E2E_KIOSK_EMAIL:
         required: true
+      # Optional: the three shared demo accounts (muk docs/demo-accounts.md),
+      # seeded 2026-08-03. The visual project's demo-badge specs skip without
+      # NAME+PASSWORD, and the ui job's preflight requires all three so the
+      # skip cannot happen silently in this pipeline. The EMAIL matters: the
+      # suite's login() helper falls back to the real name-login UI without
+      # it, and every UI demo login burns the shared demo-login-daily
+      # circulation cap (10/24h) that exists to spot forwarded demo links —
+      # a normal PR day of CI would trip it.
+      E2E_DEMO_NAME:
+        required: false
+      E2E_DEMO_PASSWORD:
+        required: false
+      E2E_DEMO_EMAIL:
+        required: false
       # Optional: the Playwright suite's invite-acceptance specs create a test
       # member and then delete it again through the admin UI, whose delete is a
       # Next.js server action needing the service-role client. Without the key
@@ -797,12 +811,16 @@ jobs:
       E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
       E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
       E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+      E2E_DEMO_NAME: ${{ secrets.E2E_DEMO_NAME }}
+      E2E_DEMO_PASSWORD: ${{ secrets.E2E_DEMO_PASSWORD }}
+      E2E_DEMO_EMAIL: ${{ secrets.E2E_DEMO_EMAIL }}
     steps:
       - name: Required UI-test secrets are present
         run: |
           missing=""
           for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
-                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL; do
+                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
+                      E2E_DEMO_NAME E2E_DEMO_PASSWORD E2E_DEMO_EMAIL; do
             eval "value=\${$name:-}"
             [ -n "$value" ] || missing="$missing $name"
           done
