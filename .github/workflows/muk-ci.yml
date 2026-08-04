@@ -938,7 +938,20 @@ jobs:
           # --db-url avoids `supabase link` (this repo has no config.toml). Only
           # migrations missing from the remote ledger run; the other apps'
           # migrations are already recorded there and are left untouched.
-          supabase db push --db-url "$SUPABASE_DB_URL"
+          #
+          # --include-all applies muk migrations whose timestamp sorts BEFORE the
+          # last one already on remote. Without it, `db push` refuses the whole
+          # deploy the moment two migration-carrying PRs are open at once and the
+          # later-timestamped one merges first (the older PR's migration is then
+          # "inserted before" it) — and because this step aborts before the
+          # function deploy below, it strands the edge functions too. That is a
+          # recurring, self-inflicted delay, not a safety net: this job runs only
+          # on push-to-main, so every migration here is already approved and
+          # shipping, and the STRICT drift check right after re-verifies every
+          # migration actually landed — a genuinely lost one still fails loudly.
+          # It only ever considers muk's local files, so other apps' ledger rows
+          # stay untouched exactly as before.
+          supabase db push --include-all --db-url "$SUPABASE_DB_URL"
 
       - name: Assert muk RLS is still scoped to muk membership
         env:
