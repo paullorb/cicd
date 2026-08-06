@@ -155,6 +155,20 @@ jobs:
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 25
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Lint, typecheck, edge functions & build
+
+          The fast deterministic gate every change passes first: ESLint, TypeScript, the Deno type-check of the Supabase edge functions, the unit tests with coverage, a production build, and the gzipped client-JS bundle budgets. It is the cheapest place to catch a mistake, so almost everything that can be checked without a browser or a database is checked here.
+
+          **Green means** the code compiles, the unit tier passes, and the shipped JavaScript is within budget.
+
+          **Red means** read the step that failed — a lint/type error is yours to fix; a bundle-budget failure means this change grew the client bundle past bundle-budgets.json and needs either slimming or a deliberate, reviewed budget bump.
+
+          `npm audit` deliberately does NOT run here: a new advisory against an existing dependency would fail every unrelated PR and wedge the auto-merge queue. It runs nightly instead.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -209,6 +223,18 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Secret scan (gitleaks)
+
+          Scans the FULL git history for committed credentials on every run. This pipeline handles a service-role key, the production database URL, a PAT and push keys, and the repository is private without GitHub Advanced Security — so nothing else is scanning it.
+
+          **Green means** no credential-shaped string was found anywhere in history.
+
+          **Red means** treat it as a live incident: ROTATE the exposed credential first (it must be assumed compromised the moment it was pushed), and only then rewrite history to remove it. Deleting the commit alone is not a fix.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Scan history, not just the tip: a secret committed and then
@@ -262,6 +288,18 @@ jobs:
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Dependency audit (lockfile PRs)
+
+          Blocks a pull request that INTRODUCES a known-vulnerable production dependency. It audits only when the branch touches package-lock.json, so an advisory published mid-flight can never wedge unrelated pull requests.
+
+          **Green means** either the lockfile is untouched (nothing to audit) or the new dependency tree carries no high-severity advisory.
+
+          **Red means** the lockfile changed and production dependencies now carry a high-severity advisory. Note the known limitation: it also reports pre-existing advisories, so check whether this change actually introduced it before treating it as a blocker.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Needed to diff against the PR base.
@@ -292,6 +330,18 @@ jobs:
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Project rules
+
+          Enforces the repository invariants that are specific to this project rather than to JavaScript: new Supabase RLS policies must be scoped to muk membership (never to bare authenticated, because the Supabase project is shared with other apps), production schema must not have drifted, and types/supabase.ts must match the live schema.
+
+          **Green means** the shared-database safety rules hold and the generated types are current.
+
+          **Red means** an RLS failure is the serious one — an unscoped policy would expose muk data to any logged-in user of any other app on this Supabase project. A types mismatch usually just means running npm run gen:types. Drift here is read-only and non-strict: a migration merely awaiting deploy is normal and does not fail.
+          TLDR
+
       # Every secret-gated step below self-skips when its secret is absent
       # (correct for forks; this repo is private, so there are none). Without
       # this assertion a rotated/renamed secret — or a Dependabot PR, which
@@ -398,6 +448,18 @@ jobs:
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Prod sync (migrations & edge functions)
+
+          A read-only answer to two questions on every pull request: is production still in sync with this repository, and what exactly will merging deploy? The edge-function half is the only staleness check the functions get before merge.
+
+          **Green means** production schema and edge functions match the repository.
+
+          **Red means** something merged earlier never reached production — most often because its deploy job was skipped when another job was red. Check what is pending before merging more on top of it.
+          TLDR
+
       # See the identical step in the rules job.
       - name: Required secrets are present
         env:
@@ -466,6 +528,18 @@ jobs:
     env:
       SCRATCH_DB: muk_ci_${{ github.run_id }}_${{ github.run_attempt }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Migrations replay (scratch Postgres)
+
+          Proves every migration still applies, in order, to an empty database — before the merge replays the new ones onto the SHARED production database. It then re-asserts RLS scoping on the freshly built schema and runs the SQL integration tests that cover permission boundaries.
+
+          **Green means** the migration history is replayable from scratch and the database enforces the access rules it should.
+
+          **Red means** do not merge. Either a migration is not replayable (it depends on state only production has), or a policy/trigger lets the wrong caller through. Catching an unscoped SECURITY DEFINER function here is the whole point: the production-side assert only sees it after deploy, which is how a past change turned main red post-merge.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Ensure a local PostgreSQL with the pg_cron stub
@@ -687,6 +761,18 @@ jobs:
       E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
       E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Playwright e2e (sharded)
+
+          The golden cross-system flows — event lifecycle, membership and credentials, check-in — driven through a real browser against the REAL production database. The two shards use separate production account sets so they never mutate the same rows.
+
+          **Green means** the flows a member actually depends on still work end to end.
+
+          **Red means** a real user-facing flow is broken. Two specific causes worth checking first: a change that alters a database or edge-function contract fails here until the migration deploys (ship a compatibility bridge, or land the migration in its own PR first), and a UI change whose golden-flow assertions were left stale. A test that passed only on retry still counts as failed — find the race rather than widening a timeout.
+          TLDR
+
       # The authenticated specs self-skip without the E2E_* secrets, degrading
       # this check to "the homepage renders" while still reporting green — which
       # is exactly what happens on a Dependabot PR until the Actions secrets are
@@ -815,6 +901,18 @@ jobs:
       E2E_DEMO_PASSWORD: ${{ secrets.E2E_DEMO_PASSWORD }}
       E2E_DEMO_EMAIL: ${{ secrets.E2E_DEMO_EMAIL }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Playwright UI (mobile touch & visual regression)
+
+          The two read-only browser projects: mobile touch and edge-swipe behaviour, and visual-regression snapshots plus automated accessibility checks. They run against the stable admin account so they can share the machine with the mutation-aware shards.
+
+          **Green means** the UI looks and behaves as its baselines say it should.
+
+          **Red means** if the change was INTENDED to alter what a screen shows, the baselines are simply stale — regenerate them locally with npx playwright test --project=visual-chromium --update-snapshots and eyeball the result before committing (baselines have leaked real member data before). If the change was not meant to be visible, something regressed.
+          TLDR
+
       - name: Required UI-test secrets are present
         run: |
           missing=""
@@ -865,6 +963,18 @@ jobs:
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Playwright e2e (required-check gate)
+
+          A name-stable gate that the branch protection ruleset can require. The real work happens in the sharded e2e and UI jobs; this job passes only when every one of them passed.
+
+          **Green means** every browser shard succeeded.
+
+          **Red means** at least one shard failed OR was skipped. It is deliberately fail-closed, so a shard that never ran blocks the merge instead of quietly satisfying the check — look at the shard jobs above for the actual failure.
+          TLDR
+
       - name: All e2e shards passed
         run: |
           e2e_result="${{ needs.e2e.result }}"
@@ -917,6 +1027,18 @@ jobs:
       # For the DORA deployment record below.
       deployments: write
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Deploy migrations & edge functions (merge to main only)
+
+          Ships the database schema and the Supabase edge functions to production, then re-asserts RLS scoping and checks strictly for drift. It runs only on a push to main; on a pull request it shows as skipped, which is the design — the squash-merge starts its own run, and THAT run deploys.
+
+          **Green means** production schema and functions now match this commit.
+
+          **Red means** production may be half-migrated: the job stops before deploying any function if a migration step fails, so schema and functions cannot silently diverge — but a failure here means the app is live against a backend that is not what this commit expects. Fix it before merging anything further.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1030,6 +1152,18 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Deploy app to Vercel (preview — PRs only)
+
+          Builds a preview deployment of the app for this pull request, but only after the quality, rules, migration and browser checks have passed. Vercel's own git integration is deliberately disabled so that CI is the only thing that can ship.
+
+          **Green means** a preview URL is in this summary, built from a fully green pull request.
+
+          **Red means** the preview did not build or deploy. It does not affect production, but the same failure will usually repeat on the production deploy after merge.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1067,6 +1201,18 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Deploy app to Vercel (production — merge to main only)
+
+          Ships the web app to production, AFTER the schema and edge functions are live, then polls www.muk.events until it actually serves this commit before recording the deployment.
+
+          **Green means** the live site is serving this exact commit — verified, not assumed.
+
+          **Red means** either the deploy failed, or it succeeded but the domain never served the new build (an alias or custom-domain slip). The verification step exists so that case is never recorded as a successful deploy. Production is likely still serving the previous commit.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0

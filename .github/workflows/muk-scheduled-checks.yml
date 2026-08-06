@@ -47,7 +47,7 @@ permissions:
 env:
   SUPABASE_PROJECT_REF: ${{ inputs.supabase_project_ref }}
 
-# All three jobs run on the self-hosted muk-ci pool (routed via MUK_CI_LABELS,
+# Every job here runs on the self-hosted muk-ci pool (routed via MUK_CI_LABELS,
 # like ci.yml). If the runner box is down, runner-watchdog.yml re-routes them
 # to ubuntu-latest — and its own failure email doubles as the "runner is down"
 # alarm, so this canary never falls silent for long.
@@ -58,6 +58,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Migration & function drift
+
+          The nightly strict check that production still matches this repository: every merged migration applied, no edge function older than its source, RLS still scoped to muk membership, and types/supabase.ts still matching the live schema. By nightly, anything unapplied is a genuinely lost deploy rather than work in flight.
+
+          **Green means** production is exactly what the repository says it should be.
+
+          **Red means** a merge never reached production. This has happened three times in one day before, when deploy jobs were skipped by an unrelated red job. Find what is pending and deploy it.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # The function staleness check dates each function's last source
@@ -135,6 +147,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Supabase advisors
+
+          Asks Supabase itself for the security and performance lints it raises against this project — unindexed foreign keys, tables without RLS, and similar findings nobody would otherwise look at.
+
+          **Green means** Supabase reports nothing actionable.
+
+          **Red means** Supabase has flagged a security or performance issue. Read the advisor output; a security-category finding on a shared-database project deserves same-day attention.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -163,6 +187,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Database metrics
+
+          One scrape of the Supabase Metrics API asserted against thresholds sized for this instance: disk, connections, cache hit ratio, replication lag, load and memory. The dashboard graphs all of this, but nothing watches the dashboard.
+
+          **Green means** the database is comfortably inside its operating envelope.
+
+          **Red means** a resource trend is heading somewhere bad — this is designed to turn a slow squeeze like a filling data disk into a next-morning email instead of an outage. A failure naming a missing metric means the beta API renamed something and the assertion needs updating, not that the database is unhealthy.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -193,6 +229,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Observation alignment (prod vs feature registry)
+
+          Reads the last 30 days of real observation rows and judges them against the feature registry: does every kind that production actually emits belong to a feature that claims it?
+
+          **Green means** what production records matches what the code says it records.
+
+          **Red means** production is emitting something the registry does not claim — usually a write site added without registering it, or a feature whose actor classes drifted. Rare or dead kinds are only reported, never failed.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -220,6 +268,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Sweep stranded e2e events
+
+          The blanket net for test debris. Each CI run deletes its own test events immediately, but a runner killed too hard for even an always() cleanup step leaves rows behind. This catches those within a day.
+
+          **Green means** nothing was stranded, or the strays were cleaned up (the count is in the log).
+
+          **Red means** the cleanup query itself could not run — a database connectivity or credentials problem, not a data problem. Real member data is never at risk here: the delete is scoped to the test marker AND the admin source, and only to rows over two hours old.
+          TLDR
+
       - name: Delete E2E-TEST events older than 2 hours
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -242,6 +302,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Production dependency audit
+
+          Nightly npm audit of production dependencies. It lives here rather than in the PR gate on purpose: as a required check it would fail every unrelated pull request the moment a new advisory landed, and wedge the auto-merge queue.
+
+          **Green means** no high-severity advisory affects anything shipped to users.
+
+          **Red means** a new CVE affects a production dependency. Delivery is not blocked — that is the trade — so treat it as a same-week task. Note that most advisories here land on transitive dev dependencies and are answered with a ranged overrides entry in package.json rather than a Dependabot PR.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -282,6 +354,18 @@ jobs:
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Lighthouse baseline (mobile, 3 samples)
+
+          The full browser-measured performance, accessibility, best-practices and SEO audit, three samples on an idle machine at 03:17. It is the sole enforcing home of these budgets: the per-PR gate is a fast bundle-size check with no browser, because timing-sensitive scores flaked under CI contention and blocked merges for reasons no commit caused.
+
+          **Green means** the site is within its byte budgets and every enforced category score holds (performance at or above 0.90; accessibility, best practices and SEO at 1).
+
+          **Red means** a real regression in page weight or a category score — off the merge path by design, so it emails rather than blocks. Only the public routes have a hard total-transfer budget; the admin routes move with production content and are advisory.
+          TLDR
+
       - name: Credentials are present
         id: creds
         run: |
@@ -375,6 +459,18 @@ jobs:
       pull-requests: read
       deployments: read
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### DORA metrics (30-day window)
+
+          Reports the four DORA delivery metrics over the trailing 30 days from data the pipeline already produces: recorded deployments, merged pull requests, and main-branch CI runs.
+
+          **Green means** the numbers are in this summary. This job is pure reporting and never blocks anything.
+
+          **Red means** the metrics could not be computed (a GitHub API or permissions problem). Nothing about delivery is broken.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -401,6 +497,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Code efficiency (duplication & dead code)
+
+          Measures code duplication, dead files/exports/dependencies, and unused CSS selectors, gated against budgets that the owner deliberately seeded at ZERO.
+
+          **Green means** there is nothing to prune.
+
+          **Red means** EXPECTED, and the intended pressure: this stays red until the measured backlog is pruned. The summary lists the specific offenders, so a red run converts directly into pruning tasks. Raising a budget is a deliberate, reviewed acceptance — never a way to quiet the gate.
+          TLDR
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -422,3 +530,54 @@ jobs:
       - name: Add code-efficiency report to run summary
         if: always()
         run: node scripts/write-ci-summary.mjs code-efficiency .code-efficiency
+
+  # Nightly tech-stack currency canary: is anything we build on superseded,
+  # unmaintained, or newly unblocked? It reads the npm registry's own dist-tags
+  # rather than `npm outdated`, which hides versions outside the declared range
+  # — with "eslint": "^9" pinned, npm reported nothing at all while ESLint 10
+  # shipped and 9 went EOL. Three signals fire: a new MAJOR for a direct
+  # dependency, an upstream blocker LIFTING (a peer range that finally admits
+  # an upgrade we were waiting on), and a release line reaching end-of-life.
+  #
+  # Red means a DECISION is due, not that something is broken: the owner reads
+  # the summary, then either upgrades or records the wait in the app repo's
+  # tech-stack-acknowledged.json. Anything already acknowledged stays quiet, so
+  # this job is silent until the ecosystem actually moves. Minor/patch drift is
+  # Dependabot's job and never signals here. Reasoning lives in
+  # docs/tech-stack.md. Pure registry analysis: no secrets, no server, no
+  # browser, and no npm ci (versions come from the lockfile).
+  tech-stack:
+    name: Tech stack currency (supersession watch)
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Tech stack currency (supersession watch)
+
+          Asks nightly whether anything the project is built on has been superseded, gone end-of-life, or become newly unblocked. It reads the npm registry directly rather than npm outdated, which hides versions outside the declared range — with eslint pinned to ^9, npm reported nothing at all while ESLint 10 shipped and 9 went end-of-life.
+
+          **Green means** nothing has moved that has not already been reviewed and decided on.
+
+          **Red means** a DECISION is due, not that anything is broken. Read the table above, then either do the upgrade or record why we are waiting in tech-stack-acknowledged.json. Minor and patch drift never signals here — that is Dependabot's job. The reasoning behind every tool choice lives in docs/tech-stack.md.
+          TLDR
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          # See muk-ci.yml: the runner-local npm cache is already warm; the
+          # setup-node cloud cache restored a 1.4 GB archive per job.
+          package-manager-cache: false
+
+      - name: Measure dependency currency, blockers and end-of-life dates
+        run: node scripts/measure-tech-stack.mjs
+
+      - name: Fail on tech-stack signals nobody has decided on yet
+        run: node scripts/assert-tech-stack.mjs
+
+      - name: Add tech-stack report to run summary
+        if: always()
+        run: node scripts/write-ci-summary.mjs tech-stack .tech-stack

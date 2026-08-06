@@ -1,0 +1,5 @@
+# scripts/check-workflows.mjs fetches js-yaml on demand; nothing here is a
+# published package, so the install is disposable.
+node_modules/
+package-lock.json
+package.json

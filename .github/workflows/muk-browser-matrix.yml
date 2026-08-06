@@ -85,6 +85,18 @@ jobs:
       group: e2e-prod-set-1
       cancel-in-progress: false
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Playwright ${{ matrix.browser }}
+
+          Weekly cross-browser regression. Pull requests run Chromium only, to stay fast; Firefox and WebKit run here so cross-browser breakage still surfaces without adding six minutes to every pull request.
+
+          **Green means** the golden flows work in this browser too.
+
+          **Red means** something is broken in this browser specifically. WebKit is the historically flaky one and already has retries configured, so check whether the failure reproduces before treating it as a real regression.
+          TLDR
+
       # Without the E2E_* secrets the authenticated suites self-skip and the
       # weekly cross-browser canary silently proves nothing. Fail loudly.
       - name: Required secrets are present
