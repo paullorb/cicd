@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -99,16 +98,22 @@ export function checkWorkflows(dir, readFile, listFiles, parseYaml) {
 }
 
 function loadYaml() {
-  // This repo carries no package.json on purpose — it is workflows, not an
-  // app. Fetch the parser on demand so the check stays a single file.
+  // js-yaml is pinned EXACTLY in package.json and locked with an integrity
+  // hash, and CI installs it with `npm ci --ignore-scripts`. It used to be
+  // fetched on demand with `npm install js-yaml@5`, which was wrong twice
+  // over: an unlocked major resolves to whatever is newest at run time, so a
+  // broken upstream release fails commits that changed nothing, and without
+  // --ignore-scripts a compromised package (or any of its transitive deps)
+  // would run lifecycle scripts on a runner that already holds the checkout
+  // and the job token. A security check must not be the least careful
+  // installer in the pipeline.
   const require = createRequire(import.meta.url);
   try {
     return require("js-yaml").load;
   } catch {
-    execFileSync("npm", ["install", "--no-save", "--no-audit", "--no-fund", "js-yaml@5"], {
-      stdio: "inherit",
-    });
-    return require("js-yaml").load;
+    throw new Error(
+      "js-yaml is not installed — run `npm ci --ignore-scripts` in this repo first.",
+    );
   }
 }
 

@@ -1,5 +1,4 @@
-# scripts/check-workflows.mjs fetches js-yaml on demand; nothing here is a
-# published package, so the install is disposable.
+# package.json and package-lock.json ARE checked in: scripts/check-workflows.mjs
+# needs an exactly-pinned, integrity-locked parser rather than whatever
+# `npm install js-yaml@5` resolves to on the day it runs.
 node_modules/
-package-lock.json
-package.json

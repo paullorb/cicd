@@ -1,0 +1,12 @@
+{
+  "name": "cicd-workflow-checks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dependencies for scripts/check-workflows.mjs only. This repo ships workflows, not an application.",
+  "scripts": {
+    "check:workflows": "node scripts/check-workflows.mjs"
+  },
+  "devDependencies": {
+    "js-yaml": "5.2.3"
+  }
+}

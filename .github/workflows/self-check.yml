@@ -38,7 +38,7 @@ jobs:
 
           **Green means** the workflows are safe to pin from a consuming repository.
 
-          **Red means** do not pin this commit. An unparseable workflow fails in the CONSUMER repo with no jobs and no logs; an unpinned action is somebody else's write access to a privileged pipeline; a missing timeout can hold a self-hosted runner slot for six hours; and a job with no summary block is a check nobody can act on when it goes red.
+          **Red means** do not pin this commit. An unparseable or GitHub-invalid workflow fails in the CONSUMER repo with no jobs and no logs; an unpinned action is somebody else's write access to a privileged pipeline; a missing timeout can hold a self-hosted runner slot for six hours; and a job with no summary block is a check nobody can act on when it goes red.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -47,5 +47,41 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Check every workflow
+      # Locked and script-free: this job's whole point is to be the careful
+      # one. `npm ci` honours the committed lockfile's integrity hashes, and
+      # --ignore-scripts means no dependency executes code on a runner that
+      # holds the checkout and the job token.
+      - name: Install the pinned YAML parser
+        run: npm ci --ignore-scripts
+
+      # actionlint validates what a YAML parser cannot: GitHub's own schema
+      # and expression syntax. `if: ${{ github.ref == }}` is perfectly valid
+      # YAML and passes every structural check below, yet GitHub rejects the
+      # workflow at startup — no jobs, no logs, in the CONSUMER repo. That is
+      # precisely the failure this self-check exists to prevent, so parsing
+      # alone was never enough.
+      #
+      # Pinned by version AND verified by checksum, like the gitleaks install
+      # in muk-ci.yml: a linter that runs on every push is not a place to
+      # trust a mutable download. It also runs shellcheck over every `run:`
+      # block, which matters in a repo that is mostly shell.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" --version
+
+      - name: Workflows are valid GitHub Actions syntax
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/actionlint" -no-color -oneline
+
+      - name: Workflows follow the house rules
         run: node scripts/check-workflows.mjs
