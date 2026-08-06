@@ -179,6 +179,37 @@ jobs:
           fi
           node scripts/assert-db-metrics.mjs
 
+  # The prod-reality half of the app repo's feature-alignment system
+  # (lib/feature-registry.ts; the static half PR-gates in the unit tier).
+  # One read of the last 30 days of muk.observations, judged against the
+  # registry: an unknown kind or a post-epoch actor-class the owning feature
+  # does not claim fails the job — the same next-morning email as the other
+  # canaries — while rare/dead kinds are only reported. Deliberately nightly
+  # and never per-PR: it queries live prod and reasons about time windows,
+  # not diffs. No npm ci: the script's only import is the registry, whose
+  # type-only imports Node ≥ 23.6 strips natively.
+  observation-alignment:
+    name: Observation alignment (prod vs feature registry)
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Prod observations align with the feature registry
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_SERVICE_ROLE_KEY not set — the nightly observation-alignment canary cannot run."
+            exit 1
+          fi
+          node scripts/assert-observation-alignment.mjs
+
   # The blanket net for e2e debris. The per-run sweep in ci.yml/browser-matrix
   # deletes a run's own events immediately, but a runner killed too hard for
   # even `if: always()` leaves them behind — this catches those within a day.
