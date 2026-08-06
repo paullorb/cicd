@@ -33,6 +33,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Trigger muk-sync-events
+
+          The only automatic trigger for the external event feed seed. It replaced firing the sync on every single login, which re-ran the whole pipeline per sign-in for a feed that changes a few times a week.
+
+          **Green means** the feed was refreshed; worst-case staleness is one interval.
+
+          **Red means** the feed is going stale. Check the edge function and its credentials — the request needs both the project publishable key and the function's own token, since JWT verification is on at the gateway.
+          TLDR
+
       - name: Call the edge function
         env:
           SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}

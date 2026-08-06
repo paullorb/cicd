@@ -1,0 +1,15 @@
+# actionlint configuration. Kept as small as possible: an ignore here is a
+# rule switched off, so each one states why.
+
+paths:
+  .github/workflows/app-native-build.yml:
+    ignore:
+      # SC2012 (`ls` instead of `find`) on the step that picks the newest
+      # Android build-tools directory. Those directory names are SDK version
+      # numbers — "35.0.0", never a filename with a space or newline — so the
+      # class of bug the rule guards against cannot occur here. Scoped to this
+      # one file rather than disabled globally, and left as a suppression
+      # rather than a rewrite because this workflow belongs to the other
+      # project this pipeline serves; its Android build is not ours to churn
+      # for a style nit.
+      - 'shellcheck reported issue in this script: SC2012'
