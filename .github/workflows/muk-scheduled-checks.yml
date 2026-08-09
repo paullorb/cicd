@@ -40,6 +40,30 @@ on:
         required: false
       E2E_ADMIN_PASSWORD:
         required: false
+      # The quota canary's two vendor credentials. Required, per the header
+      # note — an unwatched meter that everyone believes is watched is worse
+      # than no check at all, which is the whole reason that job exists.
+      #
+      # GH_BILLING_TOKEN cannot be GITHUB_TOKEN, and not for want of trying: a
+      # workflow token cannot reach the billing endpoints at all, and the
+      # per-repo Actions API it CAN reach measures the wrong thing here. muk.
+      # events runs on the self-hosted pool, so its billable minutes are ~0
+      # every month while roughly twenty other repos on the same account spend
+      # the included allowance — a repo-scoped measurement would report a
+      # comfortable zero forever, which is the silent-green failure this job
+      # exists to prevent.
+      #
+      # It does NOT need a purpose-built PAT. Any token that can read the
+      # account's billing usage works, so the caller passes one it already
+      # holds; the account it reads is derived from github.repository_owner
+      # rather than being a second secret to keep in step.
+      GH_BILLING_TOKEN:
+        required: true
+      # Already held for the deploy jobs; reused read-only here.
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: false
 
 permissions:
   contents: read
@@ -214,6 +238,56 @@ jobs:
             exit 1
           fi
           node scripts/assert-db-metrics.mjs
+
+  # Quota and budget monitoring — step 11 of the Careteam extraction audit, and
+  # not speculative: GitHub-hosted Actions minutes ran out in July 2026, which
+  # silently disabled the runner watchdog AND blocked Dependabot's rebases.
+  # Neither failure was visible until something downstream broke. Thresholds are
+  # 70% warn / 90% fail, because an alert at exhaustion is a post-mortem.
+  #
+  # Supabase is deliberately absent: db-metrics above already watches the only
+  # meter with a real ceiling. See the script's header.
+  quota:
+    name: Quota & budget
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Quota & budget
+
+          One read of the GitHub and Vercel billing meters for the current period, asserted against the ceilings in `quota-budgets.json` — 70% warns, 90% fails. Each line also prints a run-rate projection for the end of the period, which is reported but never gates.
+
+          **Green means** no metered resource is on course to run out or overspend this period.
+
+          **Red means** one of three different things, and the failure line says which: a meter is over 90% of its budget (look at the bill), a meter was not measured (a source is wired to no budget or vice versa), or a vendor API could not be read (a credential expired, or a response shape changed). The last two fail rather than skip on purpose — an unwatched meter everyone believes is watched is worse than no check, which is exactly how July's minute exhaustion went unnoticed.
+
+          Supabase is not here: the Database metrics job already watches its only meter with a real ceiling.
+          TLDR
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Metered resources are within budget
+        env:
+          GH_BILLING_TOKEN: ${{ secrets.GH_BILLING_TOKEN }}
+          # The account whose meters are read. In a reusable workflow this is
+          # the CALLER's owner, which is what we want and is one less secret.
+          GH_BILLING_USER: ${{ github.repository_owner }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          for name in GH_BILLING_TOKEN GH_BILLING_USER VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name not set — the nightly quota canary cannot run."
+              exit 1
+            fi
+          done
+          node scripts/assert-quota-budgets.mjs
 
   # The prod-reality half of the app repo's feature-alignment system
   # (lib/feature-registry.ts; the static half PR-gates in the unit tier).
