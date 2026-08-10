@@ -22,6 +22,12 @@ on:
       # renamed secret would silently shrink the desktop suite from 48 to 43
       # cases with only a log warning to show for it. A caller that sets this
       # promises the key exists, and the e2e preflight fails when it is absent.
+      #
+      # INERT since 2026-08-10: the e2e job runs against a local stack that
+      # always has a service-role key, so there is no longer a degraded-suite
+      # case for this to guard. Kept declared so existing callers stay valid —
+      # removing an input is a breaking change for every pinned caller — and to
+      # be reclaimed if the suite is ever pointed at a shared instance again.
       require_service_role_e2e:
         default: false
         required: false
@@ -46,6 +52,12 @@ on:
         required: true
       SUPABASE_ACCESS_TOKEN:
         required: true
+      # The E2E_* accounts below are NO LONGER READ by this workflow: since
+      # 2026-08-10 the browser suite seeds its own cast into a local stack. They
+      # stay declared because removing a secret from workflow_call breaks every
+      # pinned caller that passes it, and because muk-browser-matrix.yml — the
+      # weekly Firefox/WebKit run — still drives production and still needs
+      # them. Retire them here only in the same change that retires them there.
       E2E_ADMIN_NAME:
         required: true
       E2E_ADMIN_PASSWORD:
@@ -678,138 +690,109 @@ jobs:
         if: ${{ always() }}
         run: psql postgres -qc "drop database if exists \"$SCRATCH_DB\"" || true
 
-  # PR-only, and sharded across two independent prod account SETS so the two
-  # shards run in parallel without ever mutating the same accounts (see
-  # tests/helpers.ts: E2E_ACCOUNT_SET). Two things this buys:
-  #   - Once per change. A squash-merge lands the exact tree the PR shards
-  #     already exercised, so re-running e2e on the main push proved nothing;
-  #     the merge is gated on branch-up-to-date (main ruleset) instead, and
-  #     deploy-backend no longer needs e2e. Halves the e2e load on the shared
-  #     accounts and drops ~e2e off production delivery.
-  #   - Half the wall time. The two shards split the specs by DURATION, not
-  #     count: playwright.config.ts keys off E2E_ACCOUNT_SET to put the heavy,
-  #     atomic mutations lifecycle (~71s, one un-splittable file) alone on set 1
-  #     and everything else on set 2 (~89s) — a balance the old count-based
-  #     `--shard` couldn't make (it stacked mutations AND invite on one shard).
-  #     Each shard boots its own server on its own port and serializes only
-  #     against its own set's e2e-prod-set-<n> group (one PR's shard-1 waits on
-  #     another PR's shard-1, never on its own shard-2). muk-browser-matrix.yml
-  #     leaves E2E_ACCOUNT_SET unset, so it runs the whole suite on set 1 and
-  #     joins e2e-prod-set-1.
+  # PR-only, and run against a LOCAL Supabase stack the job brings up itself —
+  # not against production. Until 2026-08-10 this was two shards writing to two
+  # sets of real production accounts; docs/audit-2026-08-03-careteam-extraction.md
+  # step 6 is the move off them.
+  #
+  # WHAT THAT CHANGES, STATED PLAINLY BECAUSE IT IS A REAL TRADE. Running against
+  # deployed prod caught one class of problem nothing else does: a change whose
+  # app code is incompatible with the CURRENTLY DEPLOYED schema or edge
+  # functions — the "ship a compatibility bridge or land the migration first"
+  # tax. That signal is gone from the PR gate. What replaces it, partially:
+  # `rules` still compares migrations and functions against prod (name drift,
+  # stale deploys), `migrations` replays the whole ledger into scratch Postgres
+  # and asserts RLS scoping on it, and the integration tier proves the policies.
+  # What is genuinely no longer caught at PR time is app-code-vs-deployed-schema
+  # skew, which now surfaces on the main run and post-deploy asserts instead.
+  # The audit's answer is instance #0 — a deployed reference that ships FIRST —
+  # and that is where this should end up.
+  #
+  # WHY ONE JOB WHERE THERE WERE FOUR. The two shards existed to split duration
+  # AND to keep two runs off each other's production accounts; the two UI
+  # variants ran in parallel because they were read-only against those same
+  # accounts. A local stack removes the account-isolation reason entirely, and
+  # removes most of the duration: the same specs run about twice as fast without
+  # a round trip to Frankfurt (measured: the full CI project set is ~8 minutes
+  # locally). One job, one stack, one port — far less machine load on a shared
+  # three-runner box, and no cross-shard sweep to get wrong.
+  #
+  # AND IT NEEDS NO SECRETS. Every credential now comes from the stack the job
+  # started. That fixes a standing complaint in CLAUDE.md as a side effect: a
+  # Dependabot PR is served the Dependabot secret store, so its e2e used to fail
+  # in ~5s having tested nothing. It can now run the real suite.
   e2e:
-    name: Playwright e2e (shard ${{ matrix.shard }})
+    name: Playwright e2e (local stack)
     if: github.event_name == 'pull_request'
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard: 1
-            set: "1"
-            port: "3100"
-          - shard: 2
-            set: "2"
-            port: "3101"
+    timeout-minutes: 45
+    # One stack per host, on fixed ports (supabase/config.toml), so two runs
+    # cannot overlap: the second would bind-collide with the first, or worse,
+    # `supabase db reset` under a running suite. Not cancel-in-progress — a
+    # half-killed run leaves containers and a server behind, which is the
+    # situation this exists to prevent.
     concurrency:
-      group: e2e-prod-set-${{ matrix.set }}
+      group: muk-e2e-local-stack
       cancel-in-progress: false
     env:
-      # A dedicated port per shard keeps the two parallel servers off each
-      # other (and off :3200, the Lighthouse port).
-      E2E_PORT: ${{ matrix.port }}
-      # Picks this shard's account set in tests/helpers.ts.
-      E2E_ACCOUNT_SET: ${{ matrix.set }}
-      # Marker scope for the events/invites the suite creates. Per-shard (the
-      # set suffix) so the sweep below deletes exactly this shard's debris and
-      # never the sibling shard's in-flight events — both share GITHUB_RUN_ID.
-      E2E_RUN_SCOPE: r${{ github.run_id }}-s${{ matrix.set }}
-      # `playwright install`'s cache GC follows its ~/Library/Caches/
-      # ms-playwright/.links registry into every checkout that ever ran
-      # playwright on the box — including ones under ~/Documents, which macOS
-      # TCC-protects. A launchd runner has no Documents grant, so the open()
-      # inside that GC blocks forever (observed 2026-07-16: two 13-minute
-      # "Install Playwright browsers" hangs, stack stuck in __open). Skipping
-      # the GC skips the traversal; the cache just never self-prunes here.
+      E2E_PORT: "3100"
+      # See the note in the old job: a launchd runner has no Documents grant, so
+      # playwright's cache GC can block forever traversing into TCC-protected
+      # checkouts. Skipping the GC skips the traversal.
       PLAYWRIGHT_SKIP_BROWSER_GC: "1"
-      # The JSON reporter feeds the Actions run summary. The list reporter
-      # remains enabled for the live log; no separate HTML artifact is needed.
       PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-results.json"
-      # Only the original set-1 secrets: higher sets share set 1's password and
-      # derive their name/email by rule (tests/helpers.ts forSet()), keyed by
-      # E2E_ACCOUNT_SET — so sharding needs no extra secrets.
-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
-      # Baked into the build, so the notification row exists to be tested at
-      # all. See the secrets block for why this public key is passed like one.
-      NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      # Consumed by the app under test, not Playwright: the admin UI's
-      # delete-user server action needs it to remove the member the
-      # invite-acceptance specs create.
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
-      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
-      E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
-      E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
-      E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
-      E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
-      E2E_TOGGLE_NAME: ${{ secrets.E2E_TOGGLE_NAME }}
-      E2E_TOGGLE_PASSWORD: ${{ secrets.E2E_TOGGLE_PASSWORD }}
-      E2E_TOGGLE_EMAIL: ${{ secrets.E2E_TOGGLE_EMAIL }}
-      E2E_KIOSK_NAME: ${{ secrets.E2E_KIOSK_NAME }}
-      E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
-      E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
     steps:
       - name: What this job is for
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Playwright e2e (sharded)
+          #### Playwright e2e (local stack)
 
-          The golden cross-system flows — event lifecycle, membership and credentials, check-in — driven through a real browser against the REAL production database. The two shards use separate production account sets so they never mutate the same rows.
+          Every browser project — the three golden flows, mobile touch, and visual regression — driven against a Supabase stack this job starts, seeds and throws away. It writes to no production account and needs no secrets.
 
           **Green means** the flows a member actually depends on still work end to end.
 
-          **Red means** a real user-facing flow is broken. Two specific causes worth checking first: a change that alters a database or edge-function contract fails here until the migration deploys (ship a compatibility bridge, or land the migration in its own PR first), and a UI change whose golden-flow assertions were left stale. A test that passed only on retry still counts as failed — find the race rather than widening a timeout.
-          TLDR
+          **Red means** a real user-facing flow is broken, or a UI change left its golden-flow assertions or visual baselines stale (regenerate with `npx playwright test --project=visual-chromium --update-snapshots` and eyeball the result — baselines have leaked real member data before). A test that passed only on retry still counts as failed: find the race rather than widening a timeout.
 
-      # The authenticated specs self-skip without the E2E_* secrets, degrading
-      # this check to "the homepage renders" while still reporting green — which
-      # is exactly what happens on a Dependabot PR until the Actions secrets are
-      # mirrored to Dependabot secrets. Fail loudly. Both shards validate the
-      # same set-1 secrets: higher sets derive from them (tests/helpers.ts).
-      - name: Required secrets are present
-        run: |
-          missing=""
-          names="NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
-                 SUPABASE_DB_URL \
-                 E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
-                 E2E_STAFF_NAME E2E_STAFF_PASSWORD E2E_STAFF_EMAIL \
-                 E2E_TOGGLE_NAME E2E_TOGGLE_PASSWORD E2E_TOGGLE_EMAIL \
-                 E2E_KIOSK_NAME E2E_KIOSK_PASSWORD E2E_KIOSK_EMAIL"
-          # See the require_service_role_e2e input: the five account-lifecycle
-          # specs self-skip without the key, and this caller has said that is a
-          # failure, not a smaller suite.
-          if [ "${{ inputs.require_service_role_e2e }}" = "true" ]; then
-            names="$names SUPABASE_SERVICE_ROLE_KEY"
-          fi
-          for name in $names; do
-            eval "value=\${$name:-}"
-            [ -n "$value" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing — the authenticated e2e specs would self-skip and this check would pass having proven nothing. On a Dependabot PR, mirror the Actions secrets to Dependabot secrets (gh secret set <NAME> --app dependabot)."
-            exit 1
-          fi
+          **What this job no longer catches:** app code that is incompatible with the *currently deployed* schema or edge functions. That used to fail here because the suite ran against production. It now surfaces on the main run and the post-deploy asserts instead.
+          TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version-file: .nvmrc
-          # See the quality job: the runner-local npm cache is already warm,
-          # while setup-node's cloud cache restored a 1.4 GB archive per job.
           package-manager-cache: false
+
+      # Same pin the rules and migrations jobs already use — one CLI version
+      # across the workflow, not two.
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        with:
+          version: latest
+
+      # The stack needs a container runtime. Linux runners ship Docker; the
+      # self-hosted macOS pool uses Colima, which is a user-level VM and may not
+      # be running after a reboot. Homebrew's bin is named explicitly because a
+      # launchd runner's PATH is minimal.
+      - name: Ensure a container runtime
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            docker info >/dev/null 2>&1 || { echo "::error::No Docker on this Linux runner."; exit 1; }
+            echo "Docker is up."
+            exit 0
+          fi
+          export PATH="/opt/homebrew/bin:$PATH"
+          if ! command -v colima >/dev/null 2>&1; then
+            echo "::error::colima is not installed on this runner (brew install colima docker)."
+            exit 1
+          fi
+          if ! colima status >/dev/null 2>&1; then
+            echo "Colima is not running — starting it."
+            colima start --cpu 4 --memory 8 --disk 60
+          fi
+          docker info >/dev/null 2>&1 || { echo "::error::Colima is up but Docker is unreachable."; exit 1; }
+          echo "Colima is up."
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -817,148 +800,75 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # Self-hosted runners reuse the machine between runs. The port is
-      # dedicated to this shard and the e2e-prod-set group serializes its users,
-      # so anything still listening on it is a `next start` a killed run left
-      # behind — remove it before Playwright fails to boot its own server.
+      # The port is fixed and the concurrency group serializes its users, so
+      # anything still listening is a `next start` a killed run left behind.
       - name: Free the e2e port
         shell: bash
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
-      - name: Run e2e tests
-        # Authenticated specs self-skip when the E2E_* secrets are absent, and
-        # the app deliberately tolerates missing Supabase env (getSupabaseConfig
-        # returns null), so the public rendering specs stay meaningful on forks.
-        # No --shard: playwright.config.ts partitions the specs by duration via
-        # E2E_ACCOUNT_SET (mutations alone on set 1, the rest on set 2).
-        run: npm run test:e2e -- --project=chromium --reporter=list,json
+      # `start` is a no-op when the stack is already up from a previous run on
+      # this box; `db reset` is what guarantees a clean database either way. Both
+      # are needed: the first run on a fresh runner has nothing to reset.
+      - name: Start the local Supabase stack
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="/opt/homebrew/bin:$PATH"
+          supabase start || { echo "::error::supabase start failed — see the log above."; exit 1; }
+          supabase db reset --yes
+
+      # visual-chromium is EXCLUDED on Linux, and this is not a convenience.
+      # The snapshots in tests/*-snapshots/ were captured on macOS/ARM — the
+      # same platform as the self-hosted pool — so on a Linux runner every one
+      # of them fails on font rasterisation, for reasons that have nothing to do
+      # with the pull request. The only Linux path here is a Dependabot PR, and
+      # a dependency bump is not the change that should be re-baselining
+      # screenshots. Said out loud rather than silently narrowed: a smaller
+      # suite that reads as a full one is the failure mode this workflow's own
+      # secret preflights exist to prevent.
+      - name: Run the browser suite
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="/opt/homebrew/bin:$PATH"
+          projects="--project=chromium --project=mobile-chromium"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "::warning::visual-chromium skipped: its baselines are macOS/ARM and cannot pass on a Linux runner."
+            {
+              echo "> **visual-regression was not run.** Its baselines are macOS/ARM;"
+              echo "> this job is on a Linux runner (Dependabot). The golden flows and"
+              echo "> mobile touch project did run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            projects="$projects --project=visual-chromium"
+          fi
+          # shellcheck disable=SC2086
+          npm run e2e:local -- $projects --reporter=list,json
 
       - name: Add Playwright results to run summary
         if: ${{ always() }}
         run: node scripts/write-ci-summary.mjs playwright .playwright-results.json
 
-      # The mutation suite (tests/mutations.spec.ts) deletes its own test event
-      # through the UI, but a run that dies mid-test strands it. The suite tags
-      # every event it creates with this shard's run scope, so this sweep deletes
-      # exactly this shard's debris immediately — never the sibling shard's
-      # in-flight events. Scoped to the marker AND the admin source, so a real
-      # event can never match. The age-based blanket sweep for runs killed too
-      # hard for even `if: always()` lives in scheduled-checks.yml.
-      - name: Sweep this shard's test events
+      # Deliberately NOT `supabase stop`: the images and volumes are what make
+      # the next run's start a few seconds instead of a few minutes, and the
+      # `db reset` above means a leftover stack is never stale state. What does
+      # get cleaned is the app server, which would otherwise hold the port.
+      - name: Release the e2e port
         if: ${{ always() }}
-        run: |
-          if [ -z "$SUPABASE_DB_URL" ]; then exit 0; fi
-          psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --command \
-            "with removed as (delete from muk.events where source = 'muk-events-admin' and title like 'E2E-TEST ${E2E_RUN_SCOPE} %' returning id) select 'swept ' || count(*) || ' stranded test event(s)' from removed"
-
-  # Dedicated PR-blocking UI projects. They are read-only against the stable
-  # admin account, so they can use extra runner capacity in parallel with the
-  # two mutation-aware e2e shards without sharing a mutable fixture. Keeping
-  # them separate prevents broad visual snapshots and touch emulation from
-  # multiplying the weekly Firefox/WebKit matrix.
-  ui:
-    name: Playwright UI (${{ matrix.name }})
-    if: github.event_name == 'pull_request'
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: mobile touch
-            project: mobile-chromium
-            port: "3102"
-          - name: visual regression
-            project: visual-chromium
-            port: "3103"
-    # Each variant binds a FIXED port on a shared machine, so two runs of the
-    # same variant — two PRs in flight, or a push racing a PR — would fight
-    # over it. Worse than a bind error: the "free the port" step below is
-    # `lsof -ti :$E2E_PORT | xargs kill`, so the second job would kill the
-    # first job's server mid-suite and the victim would fail with an
-    # inexplicable connection error somewhere unrelated. Queue per port,
-    # exactly like the e2e shards queue per account set. Not cancel-in-progress:
-    # a half-killed Playwright run leaves the port and browser processes behind,
-    # which is the situation this exists to prevent.
-    concurrency:
-      group: muk-ui-${{ matrix.port }}
-      cancel-in-progress: false
-    env:
-      E2E_PORT: ${{ matrix.port }}
-      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
-      PLAYWRIGHT_JSON_OUTPUT_NAME: ".playwright-ui-results.json"
-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
-      # Same build input as the e2e shards. These two projects do not drive the
-      # notification row today, but they must render the same app the shards
-      # do: a build that differs from the one the baselines were captured
-      # against is how a visual project starts disagreeing with local runs.
-      NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
-      E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
-      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
-      E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
-      E2E_DEMO_NAME: ${{ secrets.E2E_DEMO_NAME }}
-      E2E_DEMO_PASSWORD: ${{ secrets.E2E_DEMO_PASSWORD }}
-      E2E_DEMO_EMAIL: ${{ secrets.E2E_DEMO_EMAIL }}
-    steps:
-      - name: What this job is for
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Playwright UI (mobile touch & visual regression)
-
-          The two read-only browser projects: mobile touch and edge-swipe behaviour, and visual-regression snapshots plus automated accessibility checks. They run against the stable admin account so they can share the machine with the mutation-aware shards.
-
-          **Green means** the UI looks and behaves as its baselines say it should.
-
-          **Red means** if the change was INTENDED to alter what a screen shows, the baselines are simply stale — regenerate them locally with npx playwright test --project=visual-chromium --update-snapshots and eyeball the result before committing (baselines have leaked real member data before). If the change was not meant to be visible, something regressed.
-          TLDR
-
-      - name: Required UI-test secrets are present
-        run: |
-          missing=""
-          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY \
-                      E2E_ADMIN_NAME E2E_ADMIN_PASSWORD E2E_ADMIN_EMAIL \
-                      E2E_DEMO_NAME E2E_DEMO_PASSWORD E2E_DEMO_EMAIL; do
-            eval "value=\${$name:-}"
-            [ -n "$value" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing — the authenticated UI project would skip and prove nothing."
-            exit 1
-          fi
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version-file: .nvmrc
-          package-manager-cache: false
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Free the UI-test port
         shell: bash
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
-      - name: Run ${{ matrix.name }} tests
-        run: npm run test:e2e -- --project=${{ matrix.project }} --reporter=list,json
-
-      - name: Add Playwright results to run summary
-        if: ${{ always() }}
-        run: node scripts/write-ci-summary.mjs playwright .playwright-ui-results.json
-
-  # The required-check gate. The sharded e2e jobs render as "Playwright e2e
-  # (shard 1/2)"; this job keeps the exact "Playwright e2e" name the main
-  # ruleset requires, and passes only when every shard passed. Fail-closed: it
-  # runs `always()` and inspects needs.e2e.result, so a skipped or failed shard
+  # The required-check gate. The work happens in a job whose NAME may change —
+  # it has been "Playwright e2e (shard 1/2)" and is now "Playwright e2e (local
+  # stack)" — while the main ruleset requires the exact context "Playwright
+  # e2e". That indirection is the whole point of this job: the suite can be
+  # restructured without touching branch protection, which is the kind of edit
+  # that blocks every PR forever when it goes wrong. Fail-closed: it runs
+  # `always()` and inspects the result, so a job that was skipped or never ran
   # blocks the merge instead of silently satisfying the check.
   e2e-gate:
     name: Playwright e2e
-    needs: [e2e, ui]
+    needs: [e2e]
     if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
@@ -968,22 +878,21 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Playwright e2e (required-check gate)
 
-          A name-stable gate that the branch protection ruleset can require. The real work happens in the sharded e2e and UI jobs; this job passes only when every one of them passed.
+          A name-stable gate that the branch protection ruleset can require. The real work happens in the `Playwright e2e (local stack)` job; this one passes only when that job passed.
 
-          **Green means** every browser shard succeeded.
+          **Green means** every browser project succeeded.
 
-          **Red means** at least one shard failed OR was skipped. It is deliberately fail-closed, so a shard that never ran blocks the merge instead of quietly satisfying the check — look at the shard jobs above for the actual failure.
+          **Red means** the suite failed OR was skipped. It is deliberately fail-closed, so a job that never ran blocks the merge instead of quietly satisfying the check — look at the job above for the actual failure.
           TLDR
 
-      - name: All e2e shards passed
+      - name: The browser suite passed
         run: |
           e2e_result="${{ needs.e2e.result }}"
-          ui_result="${{ needs.ui.result }}"
-          if [ "$e2e_result" != "success" ] || [ "$ui_result" != "success" ]; then
-            echo "::error::One or more Playwright jobs did not pass (e2e: $e2e_result, UI: $ui_result)."
+          if [ "$e2e_result" != "success" ]; then
+            echo "::error::The Playwright suite did not pass (result: $e2e_result)."
             exit 1
           fi
-          echo "All e2e shards, mobile touch tests, and visual regressions passed."
+          echo "Every browser project passed against the local stack."
 
   # ---------------------------------------------------------------------------
   # Continuous delivery. Vercel already ships the Next.js app from main via its
