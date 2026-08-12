@@ -40,7 +40,7 @@ on:
         required: false
       E2E_ADMIN_PASSWORD:
         required: false
-      # The quota canary's two vendor credentials. Required, per the header
+      # The quota canary's vendor credential. Required, per the header
       # note — an unwatched meter that everyone believes is watched is worse
       # than no check at all, which is the whole reason that job exists.
       #
@@ -59,11 +59,13 @@ on:
       # rather than being a second secret to keep in step.
       GH_BILLING_TOKEN:
         required: true
-      # Already held for the deploy jobs; reused read-only here.
-      VERCEL_TOKEN:
-        required: true
-      VERCEL_ORG_ID:
-        required: false
+      # NOT Vercel. The quota job used to also read Vercel's billing API, but
+      # the `paulops` team is on the Hobby plan, which exposes no usage data
+      # at any price point — billing/charges, the Observability Plus metrics
+      # API, and the general /v1/usage endpoint all reject Hobby with a
+      # Pro/Enterprise-only error. Confirmed directly against the account
+      # 2026-08-12, not inferred from docs. See the "WHY VERCEL IS NOT HERE
+      # EITHER" note in muk.events' scripts/assert-quota-budgets.mjs.
 
 permissions:
   contents: read
@@ -257,13 +259,13 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Quota & budget
 
-          One read of the GitHub and Vercel billing meters for the current period, asserted against the ceilings in `quota-budgets.json` — 70% warns, 90% fails. Each line also prints a run-rate projection for the end of the period, which is reported but never gates.
+          One read of the GitHub billing meters for the current period, asserted against the ceilings in `quota-budgets.json` — 70% warns, 90% fails. Each line also prints a run-rate projection for the end of the period, which is reported but never gates.
 
           **Green means** no metered resource is on course to run out or overspend this period.
 
           **Red means** one of three different things, and the failure line says which: a meter is over 90% of its budget (look at the bill), a meter was not measured (a source is wired to no budget or vice versa), or a vendor API could not be read (a credential expired, or a response shape changed). The last two fail rather than skip on purpose — an unwatched meter everyone believes is watched is worse than no check, which is exactly how July's minute exhaustion went unnoticed.
 
-          Supabase is not here: the Database metrics job already watches its only meter with a real ceiling.
+          Supabase and Vercel are not here: Database metrics above already watches Supabase's only meter with a real ceiling, and Vercel exposes no usage API at all on the Hobby plan this account is on — see the script's header.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -278,10 +280,8 @@ jobs:
           # The account whose meters are read. In a reusable workflow this is
           # the CALLER's owner, which is what we want and is one less secret.
           GH_BILLING_USER: ${{ github.repository_owner }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          for name in GH_BILLING_TOKEN GH_BILLING_USER VERCEL_TOKEN; do
+          for name in GH_BILLING_TOKEN GH_BILLING_USER; do
             if [ -z "${!name}" ]; then
               echo "::error::$name not set — the nightly quota canary cannot run."
               exit 1
