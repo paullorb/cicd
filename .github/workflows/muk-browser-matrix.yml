@@ -66,8 +66,11 @@ jobs:
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 40
     env:
-      # Same dedicated port as ci.yml's e2e shard 1 — safe because this workflow
-      # joins that shard's e2e-prod-set-1 group and so never runs beside it.
+      # The same dedicated port ci.yml's e2e job uses. That job now serializes
+      # on muk-e2e-local-stack rather than on the group below, so the port is
+      # what keeps the two apart on a shared box: whichever starts second finds
+      # :3100 taken. Neither run is frequent enough for that to be a real
+      # collision (this one is weekly), and both free the port on the way out.
       E2E_PORT: "3100"
       # See ci.yml's e2e job: the install-time cache GC hangs on TCC-protected
       # paths when run from a launchd runner.
@@ -76,11 +79,20 @@ jobs:
       fail-fast: false
       matrix:
         browser: [firefox, webkit]
-    # This suite runs against account SET 1 (it doesn't set E2E_ACCOUNT_SET), so
-    # it shares ci.yml's e2e-prod-set-1 lock: firefox and webkit never run at the
-    # same time as each other or as a PR's shard-1, which mutates the same shared
-    # accounts (mutations.spec.ts demotes/re-promotes the toggle account). A PR's
-    # shard-2 uses set 2 and is free to run alongside. Queued, not cancelled.
+    # THE ONLY SUITE LEFT THAT WRITES TO PRODUCTION. Since 2026-08-10 the PR
+    # e2e builds its own local stack, so nothing on the merge path touches
+    # these accounts any more — which also means nothing on the merge path
+    # would reveal a sweep that stopped cleaning up after itself. This weekly,
+    # unattended run is now the whole of that surface
+    # (muk.events docs/audit-2026-08-12-ci-cd.md, C3).
+    #
+    # The group therefore guards one thing rather than two: firefox and webkit
+    # never run at the same time as each other, because both drive account SET
+    # 1 (neither sets E2E_ACCOUNT_SET) and mutations.spec.ts demotes and
+    # re-promotes the toggle account. It used to be shared with ci.yml's
+    # shard 1; that membership is gone, and the name is kept because renaming
+    # a concurrency group mid-flight lets an in-flight run through it.
+    # Queued, not cancelled.
     concurrency:
       group: e2e-prod-set-1
       cancel-in-progress: false
