@@ -49,6 +49,26 @@ on:
         required: false
         default: true
         type: boolean
+      # Runner routing, as JSON so a caller can pass either a label string
+      # ('"macos-15"') or a label array ('["self-hosted","muk-ci"]'). The
+      # defaults are the hosted images this workflow has always used, so an
+      # existing caller sees no change.
+      #
+      # muk.events passes its self-hosted pool for iOS: that Mac already has
+      # Xcode, and a hosted macOS minute costs ten of a Linux one — an unsigned
+      # archive on every native-touching pull request is worth having, and worth
+      # not paying ten times over. Android stays on ubuntu-latest, where the
+      # image ships the SDK the Gradle build expects.
+      android_runs_on:
+        description: JSON runner labels for the Android job.
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
+      ios_runs_on:
+        description: JSON runner labels for the iOS job.
+        required: false
+        default: '"macos-15"'
+        type: string
 
 permissions:
   contents: read
@@ -57,7 +77,7 @@ jobs:
   android:
     if: inputs.build_android
     name: Build Android release bundle, unsigned
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.android_runs_on) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -106,7 +126,7 @@ jobs:
   ios:
     if: inputs.build_ios
     name: Build iOS release archive, unsigned
-    runs-on: macos-15
+    runs-on: ${{ fromJSON(inputs.ios_runs_on) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
