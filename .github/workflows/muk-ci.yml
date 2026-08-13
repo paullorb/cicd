@@ -1120,6 +1120,11 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
 
+      # Built HERE and shipped with --prebuilt, not uploaded as source for
+      # Vercel to rebuild. See the long note on the production job below; the
+      # preview path carries the same change so that whatever surprises the
+      # prebuilt pipeline holds surface on a pull request first, which is the
+      # only reason to change the preview job at all.
       - name: Deploy preview
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -1128,7 +1133,9 @@ jobs:
             echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. Add the Vercel token and the org/project IDs as secrets, or unset the variable."
             exit 1
           fi
-          url=$(npx --yes vercel@58.4.4 deploy --yes --token "$VERCEL_TOKEN")
+          npx --yes vercel@58.4.4 pull --yes --environment=preview --token "$VERCEL_TOKEN"
+          npx --yes vercel@58.4.4 build --token "$VERCEL_TOKEN"
+          url=$(npx --yes vercel@58.4.4 deploy --prebuilt --yes --token "$VERCEL_TOKEN")
           echo "Preview deployed: $url"
           printf '### Vercel preview\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1169,7 +1176,26 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
 
-      - name: Deploy production
+      # BUILT HERE, then shipped. `vercel deploy` without --prebuilt uploads the
+      # source and rebuilds it in Vercel's own container: a different machine,
+      # a different install, and a toolchain this pipeline does not pin — so the
+      # bytes that reached members were never the bytes any check ran against
+      # (the 2026-07-30 audit's M1). `vercel build` here produces .vercel/output
+      # from the same checkout, the same .nvmrc Node and the same lockfile every
+      # job above used, and --prebuilt uploads exactly that.
+      #
+      # `pull` first because the build needs the project's production
+      # environment variables, which live in Vercel's project settings rather
+      # than in this pipeline's secrets; it writes them to
+      # .vercel/.env.production.local, where `vercel build` reads them.
+      #
+      # The build's own identity is unaffected: next.config.ts prefers
+      # VERCEL_GIT_COMMIT_SHA and falls back to `git rev-parse HEAD`, which in
+      # this checkout is the commit being deployed — and the verification step
+      # below refuses to record a deployment the domain does not serve under
+      # that exact SHA, so a mistake here fails loudly rather than shipping a
+      # build labelled as something else.
+      - name: Build and deploy production
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
@@ -1177,7 +1203,9 @@ jobs:
             echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. A production deploy that cannot authenticate is a failed deploy, not a green one."
             exit 1
           fi
-          npx --yes vercel@58.4.4 deploy --prod --yes --token "$VERCEL_TOKEN"
+          npx --yes vercel@58.4.4 pull --yes --environment=production --token "$VERCEL_TOKEN"
+          npx --yes vercel@58.4.4 build --prod --token "$VERCEL_TOKEN"
+          npx --yes vercel@58.4.4 deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN"
 
       # The CLI returning is not the same thing as the site serving this build:
       # an alias/custom-domain slip or a stale edge would be recorded below as
