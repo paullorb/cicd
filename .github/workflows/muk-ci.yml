@@ -470,6 +470,8 @@ jobs:
           **Green means** production schema and edge functions match the repository.
 
           **Red means** something merged earlier never reached production — most often because its deploy job was skipped when another job was red. Check what is pending before merging more on top of it.
+
+          **This job is ADVISORY and deliberately not a required check.** What it reports is the state of production, not of your branch, so requiring it would block every unrelated pull request whenever an earlier deploy was left pending — a queue of red PRs that no commit caused. Read it, then decide; it is information, not a gate.
           TLDR
 
       # See the identical step in the rules job.
@@ -827,6 +829,7 @@ jobs:
       # suite that reads as a full one is the failure mode this workflow's own
       # secret preflights exist to prevent.
       - name: Run the browser suite
+        id: suite
         shell: bash
         run: |
           set -uo pipefail
@@ -842,12 +845,49 @@ jobs:
           else
             projects="$projects --project=visual-chromium"
           fi
+          # The exit code is captured rather than propagated straight away: 78
+          # is scripts/e2e-local.mjs's "the stack itself is not answering",
+          # which the recycle step below acts on. Every other code — including
+          # an ordinary red suite — passes through unchanged.
+          set +e
           # shellcheck disable=SC2086
           npm run e2e:local -- $projects --reporter=list,json
+          code=$?
+          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
 
       - name: Add Playwright results to run summary
         if: ${{ always() }}
         run: node scripts/write-ci-summary.mjs playwright .playwright-results.json
+
+      # The stack is reused between runs on purpose (see the note below the
+      # suite), and `db reset` keeps its DATA clean either way — but neither
+      # fixes a CONTAINER that has stopped answering, and a wedged one is
+      # inherited by every later run on this box. That happened on 2026-08-12:
+      # one PR's golden flows all timed out at the same 20.3s, the next died
+      # after eleven green tests, and a third failed seeding with a 502 out of
+      # the local Auth API — three symptoms, one stack, and a fail-closed
+      # required check in front of all of them
+      # (muk.events docs/audit-2026-08-12-ci-cd.md, C8).
+      #
+      # Recycling only on 78 is the point: a red SUITE must not cost the next
+      # run a cold start, and a wedged STACK must not be handed on. The
+      # detection lives in muk.events' own preflight, which local developers
+      # run too; the recovery lives here, because this job owns the machine.
+      - name: Recycle a wedged local stack
+        if: ${{ always() && steps.suite.outputs.exit-code == '78' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="/opt/homebrew/bin:$PATH"
+          echo "::warning::The local Supabase stack was not answering — stopping it so the next run rebuilds."
+          {
+            echo "> **The local stack was recycled.** Its preflight found a"
+            echo "> container that was up but not serving, so this job stopped"
+            echo "> the stack rather than leave the fault for the next run."
+            echo "> Nothing is wrong with this pull request; re-run the job."
+          } >> "$GITHUB_STEP_SUMMARY"
+          supabase stop --no-backup || true
 
       # Deliberately NOT `supabase stop`: the images and volumes are what make
       # the next run's start a few seconds instead of a few minutes, and the
@@ -1172,3 +1212,100 @@ jobs:
             | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id"
           gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
             -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
+
+  # ---------------------------------------------------------------------------
+  # The only thing that exercises an AUTHENTICATED production flow after a
+  # deploy.
+  #
+  # Until 2026-08-10 the PR suite ran against production, so app code that was
+  # incompatible with the deployed schema or edge functions failed at PR time.
+  # Moving to a local stack was right — it removed the shared-account
+  # contention and the secrets — but the comment above the e2e job claimed the
+  # lost signal "surfaces on the main run", and it does not: e2e is
+  # pull_request-only, quality/rules/migrations never talk to the deployed app,
+  # deploy-app proves the bundle SHIPPED rather than that it works, and the
+  # heartbeat probes /api/version plus one anon RPC. A member reporting it was
+  # the detector (muk.events docs/audit-2026-08-12-ci-cd.md, C2).
+  #
+  # This is deliberately a SMOKE and not the suite: a handful of read-only
+  # authenticated screens, tagged @smoke in muk's own specs, against the build
+  # deploy-app just verified the domain is serving. It writes nothing, so it
+  # cannot leave rows in production the way the old prod suite could — the
+  # weekly browser matrix remains the only thing that mutates those accounts.
+  #
+  # Red here means production is serving a build that a signed-in member
+  # cannot use. It does not roll back — there is nothing safe to roll back TO
+  # without knowing which half broke — it goes red on main and says so.
+  post-deploy-smoke:
+    name: Post-deploy smoke (production — merge to main only)
+    needs: [deploy-app]
+    if: >-
+      github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      vars.VERCEL_DEPLOY_ENABLED == 'true'
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 20
+    env:
+      # Not :3100 and not :3000 — nothing is served here. The suite talks to
+      # the public domain, and playwright.config.ts starts no webServer when
+      # PLAYWRIGHT_BASE_URL is set.
+      PLAYWRIGHT_BASE_URL: https://www.muk.events
+      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Post-deploy smoke (production)
+
+          A handful of read-only authenticated screens, driven against www.muk.events immediately after the deploy verified the domain serves this commit. The only check in this pipeline that proves a signed-in member can still use production.
+
+          **Green means** the deployed bundle, the deployed schema and the deployed edge functions work together for a real account.
+
+          **Red means** production is broken for members right now, most likely app code meeting a schema or function contract it does not match — the failure class the PR suite stopped catching when it moved to a local stack. It does not roll anything back; fix forward, and check `deploy-backend` for what shipped alongside.
+          TLDR
+
+      - name: Required secrets are present
+        env:
+          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          missing=""
+          [ -n "$E2E_ADMIN_NAME" ] || missing="$missing E2E_ADMIN_NAME"
+          [ -n "$E2E_ADMIN_PASSWORD" ] || missing="$missing E2E_ADMIN_PASSWORD"
+          [ -n "$E2E_ADMIN_EMAIL" ] || missing="$missing E2E_ADMIN_EMAIL"
+          [ -n "$NEXT_PUBLIC_SUPABASE_URL" ] || missing="$missing NEXT_PUBLIC_SUPABASE_URL"
+          [ -n "$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY" ] || missing="$missing NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing — the smoke would self-skip and report green having checked nothing, which is worse than not running it."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Drive the smoke against production
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          # The helper mints a session cookie with this rather than driving the
+          # name-login UI, which production rate-limits at 10 per five minutes.
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
+          E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
+          E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
+          E2E_STAFF_EMAIL: ${{ secrets.E2E_STAFF_EMAIL }}
+        run: npm run smoke:prod
