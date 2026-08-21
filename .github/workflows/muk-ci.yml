@@ -172,13 +172,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Lint, typecheck, edge functions & build
 
-          The fast deterministic gate every change passes first: ESLint, TypeScript, the Deno type-check of the Supabase edge functions, the unit tests with coverage, a production build, and the gzipped client-JS bundle budgets. It is the cheapest place to catch a mistake, so almost everything that can be checked without a browser or a database is checked here.
+          The fast no-browser gate: oxlint, TypeScript, `deno check` on the Supabase edge functions, the unit tests with coverage, a production build, and the gzipped client-JS bundle budgets.
 
-          **Green means** the code compiles, the unit tier passes, and the shipped JavaScript is within budget.
-
-          **Red means** read the step that failed — a lint/type error is yours to fix; a bundle-budget failure means this change grew the client bundle past bundle-budgets.json and needs either slimming or a deliberate, reviewed budget bump.
-
-          `npm audit` deliberately does NOT run here: a new advisory against an existing dependency would fail every unrelated PR and wedge the auto-merge queue. It runs nightly instead.
+          ❌ Read the step that failed. A lint or type error is yours to fix; a bundle-budget failure means this change grew the client bundle past `bundle-budgets.json` and needs slimming or a deliberate, reviewed budget bump.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -242,9 +238,7 @@ jobs:
 
           Scans the FULL git history for committed credentials on every run. This pipeline handles a service-role key, the production database URL, a PAT and push keys, and the repository is private without GitHub Advanced Security — so nothing else is scanning it.
 
-          **Green means** no credential-shaped string was found anywhere in history.
-
-          **Red means** treat it as a live incident: ROTATE the exposed credential first (it must be assumed compromised the moment it was pushed), and only then rewrite history to remove it. Deleting the commit alone is not a fix.
+          ❌ Treat it as a live incident: ROTATE the exposed credential first, then rewrite history to remove it. Deleting the commit alone is not a fix.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -305,11 +299,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Dependency audit (lockfile PRs)
 
-          Blocks a pull request that INTRODUCES a known-vulnerable production dependency. It audits only when the branch touches package-lock.json, so an advisory published mid-flight can never wedge unrelated pull requests.
+          Blocks a pull request that INTRODUCES a known-vulnerable production dependency. It audits only when the branch touches `package-lock.json`, so an advisory published mid-flight can never wedge unrelated pull requests.
 
-          **Green means** either the lockfile is untouched (nothing to audit) or the new dependency tree carries no high-severity advisory.
-
-          **Red means** the lockfile changed and production dependencies now carry a high-severity advisory. Note the known limitation: it also reports pre-existing advisories, so check whether this change actually introduced it before treating it as a blocker.
+          ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -347,11 +339,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Project rules
 
-          Enforces the repository invariants that are specific to this project rather than to JavaScript: new Supabase RLS policies must be scoped to muk membership (never to bare authenticated, because the Supabase project is shared with other apps), production schema must not have drifted, and types/supabase.ts must match the live schema.
+          Enforces the invariants specific to this project rather than to JavaScript: new RLS policies scoped to muk membership (never bare `authenticated`, because the Supabase project is shared with other apps), no production schema drift, and `types/supabase.ts` matching the live schema.
 
-          **Green means** the shared-database safety rules hold and the generated types are current.
-
-          **Red means** an RLS failure is the serious one — an unscoped policy would expose muk data to any logged-in user of any other app on this Supabase project. A types mismatch usually just means running npm run gen:types. Drift here is read-only and non-strict: a migration merely awaiting deploy is normal and does not fail.
+          ❌ An RLS failure is the serious one — an unscoped policy would expose muk data to any logged-in user of any other app on this Supabase project. A types mismatch usually just needs `npm run gen:types`. A migration merely awaiting deploy is normal and does not fail here.
           TLDR
 
       # Every secret-gated step below self-skips when its secret is absent
@@ -467,11 +457,9 @@ jobs:
 
           A read-only answer to two questions on every pull request: is production still in sync with this repository, and what exactly will merging deploy? The edge-function half is the only staleness check the functions get before merge.
 
-          **Green means** production schema and edge functions match the repository.
+          ✅ ADVISORY, never a required check — it reports the state of production, not of your branch. Read it, then decide.
 
-          **Red means** something merged earlier never reached production — most often because its deploy job was skipped when another job was red. Check what is pending before merging more on top of it.
-
-          **This job is ADVISORY and deliberately not a required check.** What it reports is the state of production, not of your branch, so requiring it would block every unrelated pull request whenever an earlier deploy was left pending — a queue of red PRs that no commit caused. Read it, then decide; it is information, not a gate.
+          ❌ Something merged earlier never reached production, most often because its deploy job was skipped when another job was red. Find what is pending before merging more on top of it.
           TLDR
 
       # See the identical step in the rules job.
@@ -547,11 +535,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Migrations replay (scratch Postgres)
 
-          Proves every migration still applies, in order, to an empty database — before the merge replays the new ones onto the SHARED production database. It then re-asserts RLS scoping on the freshly built schema and runs the SQL integration tests that cover permission boundaries.
+          Proves every migration still applies, in order, to an empty database — before the merge replays the new ones onto the SHARED production database — then re-asserts RLS scoping on the fresh schema and runs the SQL integration tests.
 
-          **Green means** the migration history is replayable from scratch and the database enforces the access rules it should.
-
-          **Red means** do not merge. Either a migration is not replayable (it depends on state only production has), or a policy/trigger lets the wrong caller through. Catching an unscoped SECURITY DEFINER function here is the whole point: the production-side assert only sees it after deploy, which is how a past change turned main red post-merge.
+          ❌ Do not merge. Either a migration is not replayable (it depends on state only production has), or a policy or trigger lets the wrong caller through. Catching an unscoped SECURITY DEFINER function here is the whole point: the production-side assert only sees it after deploy, which is how a past change turned main red post-merge.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -751,11 +737,9 @@ jobs:
 
           Every browser project — the three golden flows, mobile touch, and visual regression — driven against a Supabase stack this job starts, seeds and throws away. It writes to no production account and needs no secrets.
 
-          **Green means** the flows a member actually depends on still work end to end.
+          ❌ A real user-facing flow is broken, or a UI change left its golden-flow assertions or visual baselines stale (regenerate with `npx playwright test --project=visual-chromium --update-snapshots`, then eyeball them — baselines have leaked real member data before). A test that passed only on retry still counts as failed: find the race rather than widening a timeout.
 
-          **Red means** a real user-facing flow is broken, or a UI change left its golden-flow assertions or visual baselines stale (regenerate with `npx playwright test --project=visual-chromium --update-snapshots` and eyeball the result — baselines have leaked real member data before). A test that passed only on retry still counts as failed: find the race rather than widening a timeout.
-
-          **What this job no longer catches:** app code that is incompatible with the *currently deployed* schema or edge functions. That used to fail here because the suite ran against production. It now surfaces on the main run and the post-deploy asserts instead.
+          Not covered here: app code incompatible with the *currently deployed* schema or edge functions. That used to fail here when the suite ran against production; it now surfaces on the main run and the post-deploy asserts.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -920,9 +904,7 @@ jobs:
 
           A name-stable gate that the branch protection ruleset can require. The real work happens in the `Playwright e2e (local stack)` job; this one passes only when that job passed.
 
-          **Green means** every browser project succeeded.
-
-          **Red means** the suite failed OR was skipped. It is deliberately fail-closed, so a job that never ran blocks the merge instead of quietly satisfying the check — look at the job above for the actual failure.
+          ❌ The suite failed OR was skipped. Deliberately fail-closed, so a job that never ran blocks the merge instead of quietly satisfying the check — the actual failure is in the job above.
           TLDR
 
       - name: The browser suite passed
@@ -983,9 +965,7 @@ jobs:
 
           Ships the database schema and the Supabase edge functions to production, then re-asserts RLS scoping and checks strictly for drift. It runs only on a push to main; on a pull request it shows as skipped, which is the design — the squash-merge starts its own run, and THAT run deploys.
 
-          **Green means** production schema and functions now match this commit.
-
-          **Red means** production may be half-migrated: the job stops before deploying any function if a migration step fails, so schema and functions cannot silently diverge — but a failure here means the app is live against a backend that is not what this commit expects. Fix it before merging anything further.
+          ❌ The app may be live against a backend that is not what this commit expects. Schema and functions cannot silently diverge (a failed migration stops the job before any function deploys), but fix this before merging anything further.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1108,9 +1088,9 @@ jobs:
 
           Builds a preview deployment of the app for this pull request, but only after the quality, rules, migration and browser checks have passed. Vercel's own git integration is deliberately disabled so that CI is the only thing that can ship.
 
-          **Green means** a preview URL is in this summary, built from a fully green pull request.
+          ✅ The preview URL is in this summary.
 
-          **Red means** the preview did not build or deploy. It does not affect production, but the same failure will usually repeat on the production deploy after merge.
+          ❌ The preview did not build or deploy. Production is unaffected, but the same failure will usually repeat on the production deploy after merge.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1164,9 +1144,9 @@ jobs:
 
           Ships the web app to production, AFTER the schema and edge functions are live, then polls www.muk.events until it actually serves this commit before recording the deployment.
 
-          **Green means** the live site is serving this exact commit — verified, not assumed.
+          ✅ The live site is serving this exact commit — verified, not assumed.
 
-          **Red means** either the deploy failed, or it succeeded but the domain never served the new build (an alias or custom-domain slip). The verification step exists so that case is never recorded as a successful deploy. Production is likely still serving the previous commit.
+          ❌ Either the deploy failed, or it succeeded but the domain never served the new build (an alias or custom-domain slip). Production is likely still serving the previous commit.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1286,9 +1266,7 @@ jobs:
 
           A handful of read-only authenticated screens, driven against www.muk.events immediately after the deploy verified the domain serves this commit. The only check in this pipeline that proves a signed-in member can still use production.
 
-          **Green means** the deployed bundle, the deployed schema and the deployed edge functions work together for a real account.
-
-          **Red means** production is broken for members right now, most likely app code meeting a schema or function contract it does not match — the failure class the PR suite stopped catching when it moved to a local stack. It does not roll anything back; fix forward, and check `deploy-backend` for what shipped alongside.
+          ❌ Production is broken for members right now, most likely app code meeting a schema or function contract it does not match — the failure class the PR suite stopped catching when it moved to a local stack. Nothing rolls back; fix forward, and check `deploy-backend` for what shipped alongside.
           TLDR
 
       - name: Required secrets are present

@@ -18,6 +18,22 @@ import { join } from "node:path";
 //      that cannot say why it exists and what its red means is a check nobody
 //      can act on. New jobs must carry one from the start, which is why this
 //      is enforced rather than left to review.
+//
+//      The block's SHAPE is a convention, not an assertion — only its presence
+//      is checked. Keep to the house format: a heading, one sentence of what
+//      the job does, then a `❌` line giving the first move when it is red plus
+//      at most one trap. It used to pair that with a "Green means" sentence,
+//      which was dropped in the 2026-08-21 pass: green needs no instructions,
+//      and restating the description under a second label was most of the word
+//      count on a block rendered identically on every single run. Add a `✅`
+//      line only where green is genuinely surprising — a job that is advisory
+//      rather than gating, one whose output IS the point, or one that verified
+//      something a reader would otherwise assume. Rationale, incident history
+//      and design trade-offs belong in comments beside the step they explain:
+//      prose in the summary is read hundreds of times and maintained never,
+//      which is how four blocks here came to describe a pipeline that had
+//      moved on (ESLint after the oxlint migration, shared prod accounts after
+//      e2e moved to a local stack, a code-efficiency backlog since pruned).
 //   4. Every action reference is pinned to a full 40-hex commit SHA — a
 //      mutable tag on a privileged pipeline is somebody else's write access.
 //
@@ -47,7 +63,7 @@ export function jobProblems(file, name, job, { requireSummary }) {
     !job.steps.some((step) => String(step?.run ?? "").includes("GITHUB_STEP_SUMMARY"))
   ) {
     problems.push(
-      `${file}: job "${name}" writes nothing to $GITHUB_STEP_SUMMARY — add a "What this job is for" step saying why the job exists and what green and red mean`,
+      `${file}: job "${name}" writes nothing to $GITHUB_STEP_SUMMARY — add a "What this job is for" step: a heading, one sentence on what the job does, then a "❌" line with the first move when it is red`,
     );
   }
   return problems;

@@ -53,11 +53,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Route CI to a live runner pool
 
-          The failover switch for the self-hosted runners. Every other job reads its runner labels from a repository variable; this is the only job that must stay on GitHub-hosted runners, because its entire purpose is to work when the runner machine does not. It flips CI to hosted runners when no self-hosted runner is online, and re-routes any run already stranded in the queue.
+          The failover switch for the self-hosted runners. Every other job reads its runner labels from a repository variable; this is the only job that must stay on GitHub-hosted runners, because its entire purpose is to work when the runner machine does not.
 
-          **Green means** the runner pool is healthy and CI is routed to it.
-
-          **Red means** doubles as the runner-is-down alarm. If the token is configured, routing has already been flipped to hosted runners automatically and CI keeps working with up to six hours of failover lag; if it is not, routing must be flipped by hand in the repository variables.
+          ❌ Doubles as the runner-is-down alarm. With the token configured, routing has already flipped to hosted runners automatically and CI keeps working with up to six hours of failover lag; without it, flip `MUK_CI_LABELS` by hand in the repository variables.
           TLDR
 
       - name: Check muk-ci runners and set MUK_CI_LABELS
