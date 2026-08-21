@@ -40,9 +40,7 @@ jobs:
 
           The only automatic trigger for the external event feed seed. It replaced firing the sync on every single login, which re-ran the whole pipeline per sign-in for a feed that changes a few times a week.
 
-          **Green means** the feed was refreshed; worst-case staleness is one interval.
-
-          **Red means** the feed is going stale. Check the edge function and its credentials — the request needs both the project publishable key and the function's own token, since JWT verification is on at the gateway.
+          ❌ The feed is going stale. Check the edge function and its credentials — the request needs both the project publishable key and the function's own token, since JWT verification is on at the gateway.
           TLDR
 
       - name: Call the edge function

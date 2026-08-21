@@ -34,11 +34,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Workflows parse and follow the house rules
 
-          Checks this repository's own reusable workflows before anyone depends on them: each file parses as YAML and declares triggers and jobs, each job has an explicit timeout and pinned actions, and each job writes a block to its run summary saying why it exists and what green and red mean.
+          Checks this repository's own reusable workflows before anyone depends on them: each file parses as YAML and declares triggers and jobs, each job has an explicit timeout and pinned actions, and each job writes a block to its run summary saying why it exists and what to do when it goes red.
 
-          **Green means** the workflows are safe to pin from a consuming repository.
-
-          **Red means** do not pin this commit. An unparseable or GitHub-invalid workflow fails in the CONSUMER repo with no jobs and no logs; an unpinned action is somebody else's write access to a privileged pipeline; a missing timeout can hold a self-hosted runner slot for six hours; and a job with no summary block is a check nobody can act on when it goes red.
+          ❌ Do not pin this commit. An unparseable or GitHub-invalid workflow fails in the CONSUMER repo with no jobs and no logs; an unpinned action is somebody else's write access to a privileged pipeline; a missing timeout can hold a self-hosted runner slot for six hours; and a job with no summary block is a check nobody can act on when it goes red.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
