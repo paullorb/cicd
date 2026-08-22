@@ -31,6 +31,15 @@ permissions:
 env:
   VERCEL_CLI_VERSION: 57.0.0
 
+# Both deploys pass --archive=tgz. Every Vercel project under one account
+# shares one per-day upload quota, and the CLI's default is one upload request
+# per file in .vercel/output — muk.events (~1,000 files a build) exhausted it on
+# 2026-08-22 and its production deploy failed. The archive is one upload per
+# deploy, whatever the build emits, so this project can neither drain the
+# quota for its neighbours nor be drained by them. Deploy semantics are
+# unchanged: Vercel unpacks server-side and the result is the same prebuilt
+# deployment.
+
 jobs:
   preview:
     name: Deploy app to Vercel, preview
@@ -63,7 +72,7 @@ jobs:
           npx --yes "vercel@$VERCEL_CLI_VERSION" build \
             --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --yes --target=preview --scope "$VERCEL_SCOPE" \
+            --prebuilt --archive=tgz --yes --target=preview --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel preview" >> "$GITHUB_STEP_SUMMARY"
@@ -100,7 +109,7 @@ jobs:
           npx --yes "vercel@$VERCEL_CLI_VERSION" build \
             --prod --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --prod --yes --scope "$VERCEL_SCOPE" \
+            --prebuilt --archive=tgz --prod --yes --scope "$VERCEL_SCOPE" \
             --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel production" >> "$GITHUB_STEP_SUMMARY"
