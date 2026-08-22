@@ -710,20 +710,32 @@ jobs:
   # Dependabot PR is served the Dependabot secret store, so its e2e used to fail
   # in ~5s having tested nothing. It can now run the real suite.
   e2e:
-    name: Playwright e2e (local stack)
+    name: Playwright e2e (lane)
     if: github.event_name == 'pull_request'
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 45
-    # One stack per host, on fixed ports (supabase/config.toml), so two runs
-    # cannot overlap: the second would bind-collide with the first, or worse,
-    # `supabase db reset` under a running suite. Not cancel-in-progress — a
-    # half-killed run leaves containers and a server behind, which is the
-    # situation this exists to prevent.
-    concurrency:
-      group: muk-e2e-local-stack
-      cancel-in-progress: false
+    # MUK_E2E_LABELS is how many e2e jobs may run at once: it names the subset
+    # of the pool whose runners are labelled for the browser suite, and a runner
+    # executes one job at a time, so "two labelled runners" IS "at most two
+    # concurrent e2e runs". Unset, it falls through to the whole pool and
+    # nothing changes — which is what makes turning this on a repo-variable
+    # edit rather than a deploy.
+    #
+    # If the runner watchdog ever fails the pool over to ubuntu-latest, it must
+    # move THIS variable too, or e2e queues against labels nothing carries.
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_E2E_LABELS || vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 25
+    # NO concurrency group any more, and that is the point of the lane work.
+    #
+    # It used to be `muk-e2e-local-stack`, serializing every PR through one
+    # Supabase stack on fixed ports — the second run would bind-collide with the
+    # first, or worse, `supabase db reset` under a running suite. Measured cost
+    # on 2026-08-22: PRs waiting 4.7, 11.3 and 18.2 minutes for the run ahead.
+    #
+    # Each runner now drives its OWN lane (scripts/stack-lane.mjs) — private
+    # project_id, containers, volumes and ports — so two e2e jobs share nothing
+    # to serialize on, and a `db reset` in one is invisible to the other
+    # (proven: a 167-migration reset ran inside another lane's suite with no
+    # effect on it). The cap on parallelism is the label above, not a queue.
     env:
-      E2E_PORT: "3100"
       # See the note in the old job: a launchd runner has no Documents grant, so
       # playwright's cache GC can block forever traversing into TCC-protected
       # checkouts. Skipping the GC skips the traversal.
@@ -733,9 +745,11 @@ jobs:
       - name: What this job is for
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Playwright e2e (local stack)
+          #### Playwright e2e (lane)
 
-          Every browser project — the three golden flows, mobile touch, and visual regression — driven against a Supabase stack this job starts, seeds and throws away. It writes to no production account and needs no secrets.
+          Every browser project — the three golden flows, mobile touch, and visual regression — driven against this runner's own LANE: a private Supabase stack, with its own database, containers and ports, that the job syncs, starts, resets and seeds. It writes to no production account and needs no secrets.
+
+          Because the lane belongs to this runner alone, two of these jobs run at the same time without a queue, and neither can be disturbed by the other — or by somebody's `npm run pre-pr` on the same machine, which claims a lane of its own. How many run at once is set by which runners carry the e2e label (`MUK_E2E_LABELS`), not by a concurrency group.
 
           ❌ A real user-facing flow is broken, or a UI change left its golden-flow assertions or visual baselines stale (regenerate with `npx playwright test --project=visual-chromium --update-snapshots`, then eyeball them — baselines have leaked real member data before). A test that passed only on retry still counts as failed: find the race rather than widening a timeout.
 
@@ -775,10 +789,25 @@ jobs:
           fi
           if ! colima status >/dev/null 2>&1; then
             echo "Colima is not running — starting it."
-            colima start --cpu 4 --memory 8 --disk 60
+            # Sized for LANES, not for one stack: each lane is ~1.3 GB of
+            # containers (measured 2026-08-22), and this box may hold two CI
+            # lanes plus the developer-side ones. 4 CPU / 8 GB was the
+            # single-stack budget and is not enough for that.
+            colima start --cpu 8 --memory 16 --disk 100
           fi
           docker info >/dev/null 2>&1 || { echo "::error::Colima is up but Docker is unreachable."; exit 1; }
           echo "Colima is up."
+
+          # A VM that was started with the old single-stack budget cannot hold
+          # several lanes, and it is NOT this job's business to fix that:
+          # restarting Colima destroys every running container on the box —
+          # the other runner's lane, a developer's stack, an agent's `pre-pr`
+          # mid-suite. So say so and carry on; the suite will simply be slower
+          # or, at worst, fail on a lane that could not start.
+          vm_mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
+          if [ "$vm_mem" -lt 12000000000 ]; then
+            echo "::warning::Colima has $((vm_mem / 1000000000)) GB; lanes want 16. Resize it during a quiet window (nothing else running on this box): colima stop && colima start --cpu 8 --memory 16 --disk 100"
+          fi
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -786,22 +815,55 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # The port is fixed and the concurrency group serializes its users, so
-      # anything still listening is a `next start` a killed run left behind.
-      - name: Free the e2e port
+      # WHICH LANE? The runner's own name, because a runner executes one job at
+      # a time — so a lane pinned to it is exclusive without any lock, and two
+      # jobs on two runners can never pick the same one. `tostinn-mac-local-3`
+      # takes ci-3; a name with no trailing index (the first runner, or a hosted
+      # VM on a Dependabot PR) takes ci-1.
+      - name: Pick this runner's lane
+        id: lane
         shell: bash
-        run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
+        run: |
+          set -euo pipefail
+          case "${RUNNER_NAME:-}" in
+            *-2) lane=ci-2 ;;
+            *-3) lane=ci-3 ;;
+            *-4) lane=ci-4 ;;
+            *)   lane=ci-1 ;;
+          esac
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+          echo "Runner ${RUNNER_NAME:-unknown} → lane $lane"
 
-      # `start` is a no-op when the stack is already up from a previous run on
-      # this box; `db reset` is what guarantees a clean database either way. Both
-      # are needed: the first run on a fresh runner has nothing to reset.
-      - name: Start the local Supabase stack
+      # Syncs this checkout's migrations, functions and seed into the lane,
+      # starts it, resets the database, and proves it is SERVING (not merely
+      # up) before a single test runs. Exit 78 means the stack is not answering
+      # — the recycle step below acts on that code alone.
+      - name: Bring up the lane
+        id: stack
         shell: bash
         run: |
           set -uo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
-          supabase start || { echo "::error::supabase start failed — see the log above."; exit 1; }
-          supabase db reset --yes
+          node scripts/stack-lane.mjs up "${{ steps.lane.outputs.lane }}"
+          code=$?
+          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      # The lane's URL, keys and app port into the job environment, so the suite
+      # and its seeding scripts all address the same database. E2E_PORT comes
+      # from here too: each lane owns a distinct one, which is what lets two
+      # `next start` servers coexist on this box.
+      - name: Point the suite at the lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/stack-lane.mjs env "${{ steps.lane.outputs.lane }}" --plain >> "$GITHUB_ENV"
+
+      # Anything still listening on this lane's port is a `next start` a killed
+      # run left behind. Lanes make that per-lane rather than machine-wide.
+      - name: Free the lane's app port
+        shell: bash
+        run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
       # visual-chromium is EXCLUDED on Linux, and this is not a convenience.
       # The snapshots in tests/*-snapshots/ were captured on macOS/ARM — the
@@ -858,26 +920,29 @@ jobs:
       # run a cold start, and a wedged STACK must not be handed on. The
       # detection lives in muk.events' own preflight, which local developers
       # run too; the recovery lives here, because this job owns the machine.
-      - name: Recycle a wedged local stack
-        if: ${{ always() && steps.suite.outputs.exit-code == '78' }}
+      - name: Recycle a wedged lane
+        if: ${{ always() && (steps.suite.outputs.exit-code == '78' || steps.stack.outputs.exit-code == '78') }}
         shell: bash
         run: |
           set -uo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
-          echo "::warning::The local Supabase stack was not answering — stopping it so the next run rebuilds."
+          echo "::warning::This runner's lane was not answering — stopping it so the next run rebuilds."
           {
-            echo "> **The local stack was recycled.** Its preflight found a"
+            echo "> **This runner's lane was recycled.** Its preflight found a"
             echo "> container that was up but not serving, so this job stopped"
-            echo "> the stack rather than leave the fault for the next run."
+            echo "> the lane rather than leave the fault for the next run."
+            echo "> Only this runner's lane is affected — other e2e jobs and"
+            echo "> local runs have their own."
             echo "> Nothing is wrong with this pull request; re-run the job."
           } >> "$GITHUB_STEP_SUMMARY"
-          supabase stop --no-backup || true
+          node scripts/stack-lane.mjs down "${{ steps.lane.outputs.lane }}" || true
 
-      # Deliberately NOT `supabase stop`: the images and volumes are what make
-      # the next run's start a few seconds instead of a few minutes, and the
-      # `db reset` above means a leftover stack is never stale state. What does
-      # get cleaned is the app server, which would otherwise hold the port.
-      - name: Release the e2e port
+      # Deliberately NOT stopping the lane: its images and volumes are what make
+      # the next run's start a few seconds instead of a few minutes, and
+      # `stack-lane up` resets the database, so a leftover lane is never stale
+      # state. What does get cleaned is the app server, which would otherwise
+      # hold the port.
+      - name: Release the lane's app port
         if: ${{ always() }}
         shell: bash
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
@@ -902,7 +967,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Playwright e2e (required-check gate)
 
-          A name-stable gate that the branch protection ruleset can require. The real work happens in the `Playwright e2e (local stack)` job; this one passes only when that job passed.
+          A name-stable gate that the branch protection ruleset can require. The real work happens in the `Playwright e2e (lane)` job; this one passes only when that job passed.
 
           ❌ The suite failed OR was skipped. Deliberately fail-closed, so a job that never ran blocks the merge instead of quietly satisfying the check — the actual failure is in the job above.
           TLDR
