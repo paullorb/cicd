@@ -113,7 +113,22 @@ jobs:
           # feature by way of a failover.
           e2e_current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" --jq '.value' 2>/dev/null || echo "")
           if [ -n "$e2e_current" ]; then
-            if [ "$online" -ge 1 ]; then e2e_desired="$E2E_SELF_HOSTED"; else e2e_desired="$HOSTED"; fi
+            # Counted over the muk-e2e SUBSET, not `online` — those are
+            # different populations, and the difference is a silent hang. Only
+            # some runners carry muk-e2e; if every one of THOSE is offline
+            # while an ordinary muk-ci runner is still up, `online` is nonzero,
+            # so this would keep routing e2e at a label nothing live carries,
+            # and the alarm-and-cancel branch below (gated on `online` being 0)
+            # would not fire either. The required check would simply queue
+            # forever, with nothing red to say why.
+            e2e_online=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runners" \
+              --jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-e2e"))] | length')
+            if [ "$e2e_online" -ge 1 ]; then e2e_desired="$E2E_SELF_HOSTED"; else e2e_desired="$HOSTED"; fi
+            # Worth saying out loud: the pool is up, so nothing else in this
+            # job will mention that the browser suite just lost its home.
+            if [ "$e2e_online" -eq 0 ] && [ "$online" -ge 1 ]; then
+              echo "::warning::No online runner carries muk-e2e, though $online muk-ci runner(s) are up — routing the browser suite to hosted runners. Label a runner muk-e2e (gh api -X POST /repos/$GITHUB_REPOSITORY/actions/runners/<id>/labels -f 'labels[]=muk-e2e') to bring it home."
+            fi
             if [ "$e2e_current" != "$e2e_desired" ]; then
               gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" \
                 -f name=MUK_E2E_LABELS -f value="$e2e_desired"
