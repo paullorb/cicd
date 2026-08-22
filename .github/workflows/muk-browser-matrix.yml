@@ -64,13 +64,18 @@ jobs:
     # Routed like ci.yml: self-hosted muk-ci pool, with the MUK_CI_LABELS
     # variable as the offline-runner escape hatch (see runner-watchdog.yml).
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 40
+    # 20, not 40: each leg measures 4-8 minutes against production (firefox
+    # the longer), and the point of the cap is a wedged WebKit — which used to
+    # hold a runner for the full 40 (2026-07-19, ~2h of blocked CI across legs;
+    # 2026-08-16, a 200-minute cancelled run). Twice the slow leg is still
+    # comfortably below the stuck-run reaper.
+    timeout-minutes: 20
     env:
-      # The same dedicated port ci.yml's e2e job uses. That job now serializes
-      # on muk-e2e-local-stack rather than on the group below, so the port is
-      # what keeps the two apart on a shared box: whichever starts second finds
-      # :3100 taken. Neither run is frequent enough for that to be a real
-      # collision (this one is weekly), and both free the port on the way out.
+      # :3100 is the port the PR e2e job USED to own. That job now runs in a
+      # lane with a port of its own (3101-3104, scripts/stack-lane.mjs in
+      # muk.events), so nothing else on the box binds 3100 any more and this
+      # weekly run has it to itself. Kept explicit so the next reader does not
+      # reach for 3000 and collide with a developer's `npm run dev`.
       E2E_PORT: "3100"
       # See ci.yml's e2e job: the install-time cache GC hangs on TCC-protected
       # paths when run from a launchd runner.
