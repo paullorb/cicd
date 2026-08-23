@@ -781,12 +781,33 @@ jobs:
           fi
           if ! colima status >/dev/null 2>&1; then
             echo "Colima is not running — starting it."
+            # WHICH SIZE? Colima applies `start` flags to an EXISTING instance,
+            # so passing the sized form here would silently resize whatever the
+            # box was deliberately set to — the muk Mac Studio runs 10 CPU since
+            # 2026-08-23 and this step would have put it back to 8 on the first
+            # job after a reboot. A saved profile already knows its size, so
+            # only a box that has never had one gets the flags.
+            #
             # Sized for LANES, not for one stack: each lane is ~1.3 GB of
             # containers (measured 2026-08-22), and this box may hold two CI
             # lanes plus the developer-side ones. 4 CPU / 8 GB was the
             # single-stack budget and is not enough for that.
-            colima start --cpu 8 --memory 16 --disk 100
+            if [ -f "$HOME/.colima/${COLIMA_PROFILE:-default}/colima.yaml" ]; then
+              colima start || true
+            else
+              colima start --cpu 8 --memory 16 --disk 100 || true
+            fi
           fi
+          # `|| true` above, and the real verdict here: two e2e jobs landing on
+          # two runners in the same minute after a reboot both see `status`
+          # fail and both start. The loser errors on an instance that is already
+          # starting — which is not a failure of anything, so what decides the
+          # step is whether Docker answers, with a grace period for the winner
+          # to finish. Nothing is retried; this only waits.
+          for _ in $(seq 1 30); do
+            docker info >/dev/null 2>&1 && break
+            sleep 10
+          done
           docker info >/dev/null 2>&1 || { echo "::error::Colima is up but Docker is unreachable."; exit 1; }
           echo "Colima is up."
 
