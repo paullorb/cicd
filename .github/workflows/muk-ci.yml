@@ -121,8 +121,8 @@ on:
       # suite instead of quietly reducing it.
       NEXT_PUBLIC_VAPID_PUBLIC_KEY:
         required: false
-      # Optional: only consumed by the deploy-preview / deploy-app jobs, which
-      # are themselves gated on the VERCEL_DEPLOY_ENABLED repo variable. Absent
+      # Optional: only consumed by the deploy-app job, which is itself gated
+      # on the VERCEL_DEPLOY_ENABLED repo variable. Absent
       # until the Vercel-from-CI cutover, so keep them optional (a missing
       # optional secret passes through as an empty string).
       VERCEL_TOKEN:
@@ -1135,72 +1135,32 @@ jobs:
   # production — with no dependency on the checks in this pipeline, so a red
   # e2e or a not-yet-applied migration could not stop (or even delay) a deploy,
   # and the app could go live tens of minutes before deploy-db/deploy-functions.
-  # These jobs move the deploy behind the checks: production only after the
-  # schema and functions are live, preview only after the PR is green.
+  # This job moves the deploy behind the checks: production only after the
+  # schema and functions are live.
   #
-  # OFF until cutover. Both jobs are gated on the VERCEL_DEPLOY_ENABLED repo
-  # variable, so re-pinning a consumer to this SHA changes nothing until the
-  # variable is set to 'true'. The cutover (see docs) is: create the VERCEL_*
-  # secrets, set VERCEL_DEPLOY_ENABLED=true, and disable Vercel's git
-  # deployments (vercel.json `git.deploymentEnabled: false`) so the two paths
-  # never double-deploy. Vercel still builds remotely here — `vercel deploy`
-  # uploads the source exactly as the git integration did.
+  # Gated on the VERCEL_DEPLOY_ENABLED repo variable, so re-pinning a consumer
+  # to this SHA changes nothing until the variable is set to 'true'. The
+  # cutover (see docs) was: create the VERCEL_* secrets, set
+  # VERCEL_DEPLOY_ENABLED=true, and disable Vercel's git deployments
+  # (vercel.json `git.deploymentEnabled: false`) so the two paths never
+  # double-deploy.
+  #
+  # THERE IS NO PREVIEW DEPLOY, deliberately (muk.events#660). One used to
+  # build every same-repo PR and post a preview URL. What it cost was a second
+  # full Next build plus a Vercel upload on every PR, on a three-runner
+  # self-hosted pool where runner capacity — not wall-clock — is the scarce
+  # resource. What it bought was a URL nobody clicked, and one real thing worth
+  # naming since it is now gone: it exercised the `vercel pull/build/deploy
+  # --prebuilt` path BEFORE merge, so a break in the prebuilt pipeline itself
+  # surfaced on a pull request instead of on the production deploy.
+  #
+  # That trade is acceptable because the post-merge failure mode is benign and
+  # loud rather than silent: deploy-app below verifies that www.muk.events
+  # actually serves the new commit before recording success, so a broken
+  # prebuilt pipeline turns main red and leaves production on the PREVIOUS
+  # commit — stale, not broken. If that ever stops being true, the preview job
+  # is the thing to bring back.
   # ---------------------------------------------------------------------------
-  deploy-preview:
-    name: Deploy app to Vercel (preview — PRs only)
-    needs: [quality, rules, migrations, e2e-gate]
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      vars.VERCEL_DEPLOY_ENABLED == 'true'
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 15
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-    steps:
-      - name: What this job is for
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Deploy app to Vercel (preview — PRs only)
-
-          Builds a preview deployment of the app for this pull request, but only after the quality, rules, migration and browser checks have passed. Vercel's own git integration is deliberately disabled so that CI is the only thing that can ship.
-
-          ✅ The preview URL is in this summary.
-
-          ❌ The preview did not build or deploy. Production is unaffected, but the same failure will usually repeat on the production deploy after merge.
-          TLDR
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version-file: .nvmrc
-          package-manager-cache: false
-
-      # Built HERE and shipped with --prebuilt, not uploaded as source for
-      # Vercel to rebuild. See the long note on the production job below; the
-      # preview path carries the same change so that whatever surprises the
-      # prebuilt pipeline holds surface on a pull request first, which is the
-      # only reason to change the preview job at all.
-      #
-      # --archive=tgz for the same reason the production job gives: one upload
-      # per deploy instead of one per file, which is what ran the account into
-      # Vercel's per-day upload cap on 2026-08-22.
-      - name: Deploy preview
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: |
-          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
-            echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. Add the Vercel token and the org/project IDs as secrets, or unset the variable."
-            exit 1
-          fi
-          npx --yes vercel@58.4.4 pull --yes --environment=preview --token "$VERCEL_TOKEN"
-          npx --yes vercel@58.4.4 build --token "$VERCEL_TOKEN"
-          url=$(npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --yes --token "$VERCEL_TOKEN")
-          echo "Preview deployed: $url"
-          printf '### Vercel preview\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
-
   deploy-app:
     name: Deploy app to Vercel (production — merge to main only)
     # After the backend: the schema and edge functions must be live before the
