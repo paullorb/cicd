@@ -198,6 +198,19 @@ jobs:
           E2E_KIOSK_PASSWORD: ${{ secrets.E2E_KIOSK_PASSWORD }}
           E2E_KIOSK_EMAIL: ${{ secrets.E2E_KIOSK_EMAIL }}
 
+      # The twin of muk-ci.yml's "Release the lane's app port". Without it a
+      # CANCELLED matrix run leaves Playwright's `sh -c "npm run build && npm
+      # run start"` chain alive on :3100 — cancellation kills the step, not the
+      # server, and the pre-step above only runs on this job's NEXT visit to
+      # the same runner, a week later. The 04:59 UTC run on 2026-08-23 was
+      # cancelled and its `next start` was still serving an 8-hour-old commit
+      # on runner 1 that afternoon (muk.events
+      # docs/audit-2026-08-23-concurrency.md, C3). `always()` runs on cancel.
+      - name: Release the e2e port
+        if: ${{ always() }}
+        shell: bash
+        run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
+
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
