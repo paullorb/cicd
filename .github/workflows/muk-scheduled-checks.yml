@@ -40,6 +40,14 @@ on:
         required: false
       E2E_ADMIN_PASSWORD:
         required: false
+      # The same audit from a member's seat (muk.events#739). Optional like the
+      # admin pair and gated the same way: the job self-skips when any of the
+      # five are absent, so a caller that wants only the other canaries stays
+      # valid rather than failing on a seat it never asked to audit.
+      E2E_STAFF_NAME:
+        required: false
+      E2E_STAFF_PASSWORD:
+        required: false
       # The quota canary's vendor credential. Required, per the header
       # note — an unwatched meter that everyone believes is watched is worse
       # than no check at all, which is the whole reason that job exists.
@@ -410,11 +418,16 @@ jobs:
     concurrency:
       group: lighthouse
       cancel-in-progress: false
-    timeout-minutes: 30
+    # 45, not 30: the staff seat (muk.events#739) adds four routes per sample to
+    # the eight that sized the old ceiling, and devtools throttling is the slow
+    # kind on purpose.
+    timeout-minutes: 45
     env:
       LIGHTHOUSE_PORT: "3200"
       E2E_ADMIN_NAME: ${{ secrets.E2E_ADMIN_NAME }}
       E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+      E2E_STAFF_NAME: ${{ secrets.E2E_STAFF_NAME }}
+      E2E_STAFF_PASSWORD: ${{ secrets.E2E_STAFF_PASSWORD }}
       NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
     steps:
@@ -431,7 +444,7 @@ jobs:
       - name: Credentials are present
         id: creds
         run: |
-          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ]; then
+          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ] || [ -z "${E2E_STAFF_NAME:-}" ] || [ -z "${E2E_STAFF_PASSWORD:-}" ]; then
             echo "::notice::Lighthouse credentials absent — skipping the nightly baseline."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
