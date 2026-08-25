@@ -59,13 +59,15 @@ on:
       # rather than being a second secret to keep in step.
       GH_BILLING_TOKEN:
         required: true
-      # NOT Vercel. The quota job used to also read Vercel's billing API, but
-      # the `paulops` team is on the Hobby plan, which exposes no usage data
-      # at any price point — billing/charges, the Observability Plus metrics
-      # API, and the general /v1/usage endpoint all reject Hobby with a
-      # Pro/Enterprise-only error. Confirmed directly against the account
-      # 2026-08-12, not inferred from docs. See the "WHY VERCEL IS NOT HERE
-      # EITHER" note in muk.events' scripts/assert-quota-budgets.mjs.
+      # Vercel is back as of 2026-08-25: the team moved to Pro, whose billing
+      # API answers, and the script itself downgrades gracefully when the plan
+      # returns to Hobby (a 404 is the plan gate, not a failure). See the
+      # "VERCEL AND THE PLAN GATE" note in muk.events'
+      # scripts/assert-quota-budgets.mjs.
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
 
 permissions:
   contents: read
@@ -241,10 +243,10 @@ jobs:
   # Neither failure was visible until something downstream broke. Thresholds are
   # 70% warn / 90% fail, because an alert at exhaustion is a post-mortem.
   #
-  # Supabase and Vercel are deliberately absent: db-metrics above already
-  # watches Supabase's only meter with a real ceiling, and Vercel exposes no
-  # usage API at all on the Hobby plan this account is on. See the script's
-  # header.
+  # Supabase is deliberately absent: db-metrics above already watches its only
+  # meter with a real ceiling. Vercel reads the billing charges API, which
+  # answers on Pro and 404s on Hobby; the script treats that 404 as a plan
+  # gate rather than a failure. See the script's header.
   quota:
     name: Quota & budget
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
@@ -255,7 +257,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Quota & budget
 
-          One read of the GitHub billing meters for the current period, asserted against the ceilings in `quota-budgets.json` — 70% warns, 90% fails. Run-rate projections are reported but never gate.
+          One read of the GitHub and Vercel billing meters for the current period, asserted against the ceilings in `quota-budgets.json` — 70% warns, 90% fails. Run-rate projections and Vercel's per-product usage lines are reported but never gate. On the Hobby plan Vercel exposes no usage API; the script reports that plan gate and drops the Vercel budget instead of failing.
 
           ❌ One of three things, and the failure line says which: a meter is over 90% of its budget (look at the bill), a meter was not measured (a source wired to no budget or vice versa), or a vendor API could not be read. The last two fail rather than skip on purpose — an unwatched meter everyone believes is watched is how July's minute exhaustion went unnoticed.
           TLDR
@@ -272,8 +274,10 @@ jobs:
           # The account whose meters are read. In a reusable workflow this is
           # the CALLER's owner, which is what we want and is one less secret.
           GH_BILLING_USER: ${{ github.repository_owner }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
         run: |
-          for name in GH_BILLING_TOKEN GH_BILLING_USER; do
+          for name in GH_BILLING_TOKEN GH_BILLING_USER VERCEL_TOKEN VERCEL_ORG_ID; do
             if [ -z "${!name}" ]; then
               echo "::error::$name not set — the nightly quota canary cannot run."
               exit 1
