@@ -121,7 +121,12 @@ jobs:
           name: android-release-unsigned
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
-          retention-days: 14
+          # Seven days, not fourteen: two archives per run at ~3.7 MB each
+          # add up fast on a shared storage allowance, and nobody has ever
+          # needed one older than the week it was built in. A release archive
+          # that must outlive that window is downloaded and kept deliberately,
+          # which is the honest way to keep one anyway.
+          retention-days: 7
 
   ios:
     if: inputs.build_ios
@@ -173,4 +178,9 @@ jobs:
           name: ios-release-unsigned
           path: ${{ runner.temp }}/App-unsigned.xcarchive
           if-no-files-found: error
-          retention-days: 14
+          # Seven days, not fourteen: two archives per run at ~3.7 MB each
+          # add up fast on a shared storage allowance, and nobody has ever
+          # needed one older than the week it was built in. A release archive
+          # that must outlive that window is downloaded and kept deliberately,
+          # which is the honest way to keep one anyway.
+          retention-days: 7
