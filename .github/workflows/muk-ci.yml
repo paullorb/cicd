@@ -268,7 +268,10 @@ jobs:
               echo "::error::No pinned gitleaks build for $RUNNER_OS/$(uname -m) — add its checksum here."
               exit 1 ;;
           esac
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/$asset" \
+          # Retry the download: this turned main red on 2026-08-29 with no
+          # secret involved, and the checksum below is what makes retrying safe.
+          curl -sSfL --retry 3 --retry-delay 2 --retry-all-errors --retry-max-time 60 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/$asset" \
             -o "$RUNNER_TEMP/gitleaks.tgz"
           echo "$sha  $RUNNER_TEMP/gitleaks.tgz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
@@ -1245,9 +1248,28 @@ jobs:
             echo "::error::VERCEL_DEPLOY_ENABLED is 'true' but VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not all set. A production deploy that cannot authenticate is a failed deploy, not a green one."
             exit 1
           fi
-          npx --yes vercel@58.4.4 pull --yes --environment=production --token "$VERCEL_TOKEN"
-          npx --yes vercel@58.4.4 build --prod --token "$VERCEL_TOKEN"
-          npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --prod --yes --token "$VERCEL_TOKEN"
+          # On 2026-08-29 the upload died on "Error: fetch failed" after the
+          # schema had already shipped, which leaves prod a commit behind until
+          # somebody re-runs the job by hand. Retrying in place is what that
+          # re-run does anyway, and the verify step below is what decides
+          # whether the deploy counted, so a duplicate attempt cannot record a
+          # build the domain does not serve.
+          retry() {
+            local what="$1"; shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::$what failed three times. A network-level failure here is Vercel's API rather than this commit; re-run the job."
+                return 1
+              fi
+              echo "::warning::$what failed (attempt $attempt of 3), retrying in $((attempt * 15))s."
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+          retry "vercel pull" npx --yes vercel@58.4.4 pull --yes --environment=production --token "$VERCEL_TOKEN"
+          retry "vercel build" npx --yes vercel@58.4.4 build --prod --token "$VERCEL_TOKEN"
+          retry "vercel deploy" npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --prod --yes --token "$VERCEL_TOKEN"
 
       # The CLI returning is not the same thing as the site serving this build:
       # an alias/custom-domain slip or a stale edge would be recorded below as
