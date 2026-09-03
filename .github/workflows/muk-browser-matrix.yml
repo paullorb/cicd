@@ -60,16 +60,28 @@ permissions:
 
 jobs:
   e2e:
-    name: Playwright ${{ matrix.browser }}
+    # ONE job for both engines, on purpose. This used to be a two-leg matrix
+    # (firefox, webkit) serialized through the concurrency group below, and
+    # that shape has a hole GitHub's semantics leave open: a group holds at
+    # most one RUNNING and one PENDING job, and a job that becomes pending
+    # cancels the job that was pending before it — `cancel-in-progress: false`
+    # protects only the running one. So a run dispatched while another was in
+    # flight queued both its legs at once, the second cancelled the first, and
+    # the run ended `cancelled` with Firefox never having started (run
+    # 33726913780, 2026-09-03). One job per run means one pending job per
+    # run, and Playwright runs both projects off a single build and server —
+    # one `npm run build` instead of two, which is the six minutes the old
+    # comment below counted.
+    name: Playwright firefox + webkit
     # Routed like ci.yml: self-hosted muk-ci pool, with the MUK_CI_LABELS
     # variable as the offline-runner escape hatch (see runner-watchdog.yml).
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    # 20, not 40: each leg measures 4-8 minutes against production (firefox
-    # the longer), and the point of the cap is a wedged WebKit — which used to
-    # hold a runner for the full 40 (2026-07-19, ~2h of blocked CI across legs;
-    # 2026-08-16, a 200-minute cancelled run). Twice the slow leg is still
-    # comfortably below the stuck-run reaper.
-    timeout-minutes: 20
+    # Both engines in one job measure ~12 minutes against production (one
+    # build, then ~5-6 minutes per engine), and the point of the cap is a
+    # wedged WebKit — which used to hold a runner for a full 40 (2026-07-19,
+    # ~2h of blocked CI across legs; 2026-08-16, a 200-minute cancelled run).
+    # Twice the measured run is still comfortably below the stuck-run reaper.
+    timeout-minutes: 25
     env:
       # :3100 is the port the PR e2e job USED to own. That job now runs in a
       # lane with a port of its own (3101-3104, scripts/stack-lane.mjs in
@@ -80,10 +92,6 @@ jobs:
       # See ci.yml's e2e job: the install-time cache GC hangs on TCC-protected
       # paths when run from a launchd runner.
       PLAYWRIGHT_SKIP_BROWSER_GC: "1"
-    strategy:
-      fail-fast: false
-      matrix:
-        browser: [firefox, webkit]
     # THE ONLY SUITE LEFT THAT WRITES TO PRODUCTION. Since 2026-08-10 the PR
     # e2e builds its own local stack, so nothing on the merge path touches
     # these accounts any more — which also means nothing on the merge path
@@ -91,13 +99,15 @@ jobs:
     # unattended run is now the whole of that surface
     # (muk.events docs/audit-2026-08-12-ci-cd.md, C3).
     #
-    # The group therefore guards one thing rather than two: firefox and webkit
-    # never run at the same time as each other, because both drive account SET
-    # 1 (neither sets E2E_ACCOUNT_SET) and mutations.spec.ts demotes and
-    # re-promotes the toggle account. It used to be shared with ci.yml's
-    # shard 1; that membership is gone, and the name is kept because renaming
-    # a concurrency group mid-flight lets an in-flight run through it.
-    # Queued, not cancelled.
+    # The group therefore guards one thing: two RUNS never drive account SET 1
+    # at the same time (nothing here sets E2E_ACCOUNT_SET, and
+    # mutations.spec.ts demotes and re-promotes the toggle account). It used
+    # to be shared with ci.yml's shard 1; that membership is gone, and the
+    # name is kept because renaming a concurrency group mid-flight lets an
+    # in-flight run through it. A run dispatched during another waits for it;
+    # a THIRD dispatched while one is already waiting replaces the waiting one
+    # (see the job comment above) — which is the right outcome for a manual
+    # re-run, and the only shape the group's semantics allow.
     concurrency:
       group: e2e-prod-set-1
       cancel-in-progress: false
@@ -105,11 +115,11 @@ jobs:
       - name: What this job is for
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Playwright ${{ matrix.browser }}
+          #### Playwright firefox + webkit
 
-          Weekly cross-browser regression. Pull requests run Chromium only, to stay fast; Firefox and WebKit run here so cross-browser breakage still surfaces without adding six minutes to every pull request.
+          Weekly cross-browser regression. Pull requests run Chromium only, to stay fast; Firefox and WebKit run here — both engines off one build — so cross-browser breakage still surfaces without adding minutes to every pull request.
 
-          ❌ Something is broken in this browser specifically. WebKit is the historically flaky one and already has retries configured, so check whether the failure reproduces before treating it as a real regression.
+          ❌ Something is broken in one of these engines specifically; the Playwright summary names which. This suite is the only one that meets the PRODUCTION database, so before reading a failure as a browser regression check whether it is a property of the live data (a seat that was registered but never seeded, a released evening that does not exist this week). WebKit is the historically flaky one and already has retries configured.
           TLDR
 
       # Without the E2E_* secrets the authenticated suites self-skip and the
@@ -167,7 +177,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+        run: npx playwright install --with-deps firefox webkit
 
       # See the identical step in ci.yml — clears a dead run's leftover server.
       - name: Free the e2e port
@@ -175,7 +185,7 @@ jobs:
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
       - name: Run e2e tests
-        run: npm run test:e2e -- --project=${{ matrix.browser }}
+        run: npm run test:e2e -- --project=firefox --project=webkit
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
@@ -215,13 +225,12 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report-${{ matrix.browser }}
+          name: playwright-report-browser-matrix
           path: playwright-report/
           retention-days: 7
 
-      # Same run-scoped sweep as ci.yml — see the comment there. Both matrix
-      # jobs share this run id, but the e2e-prod concurrency group serializes
-      # them, so one job's sweep can only ever catch this run's own debris.
+      # Same run-scoped sweep as ci.yml — see the comment there. One job per
+      # run now, so this sweep can only ever catch this run's own debris.
       - name: Sweep this run's test events
         if: ${{ always() }}
         env:
