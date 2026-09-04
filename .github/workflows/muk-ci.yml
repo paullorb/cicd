@@ -305,7 +305,7 @@ jobs:
 
           Blocks a pull request that INTRODUCES a known-vulnerable production dependency. It audits only when the branch touches `package-lock.json`, so an advisory published mid-flight can never wedge unrelated pull requests.
 
-          ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker. If the log ends in "advisory endpoint did not answer", nothing was audited: registry.npmjs.org is the problem, re-run the job.
+          ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker. A ⚠️ saying the endpoint did not answer means nothing was audited and this check passed anyway — registry.npmjs.org was down, and the nightly audit is the backstop.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -341,19 +341,69 @@ jobs:
           # that line and fails on the first attempt, so a red here still means
           # what the summary says. The nightly audit in muk-scheduled-checks.yml
           # carries the same loop.
+          # Which of the two happened is read from the REPORT, not from a
+          # message: npm exits 1 for "this tree has a high advisory" and for
+          # "the registry did not answer" alike, and those need opposite
+          # responses. `auditReportVersion` is on every real report and on no
+          # error payload, so it is the one honest signal. Matching npm's
+          # wording instead would turn a reworded error into an instant red.
+          # npm cannot tell these apart: it exits 1 both for "this tree carries a
+          # high advisory" and for "the registry did not answer", and those need
+          # opposite responses. `auditReportVersion` is on every real report and
+          # on no error payload, so it is the one honest signal — matching npm's
+          # wording instead would turn a reworded error into an instant red.
+          #
+          # Written out here rather than committed beside this workflow because
+          # a reusable workflow runs in the CALLER's checkout: a file shipped in
+          # this repository would not exist when the step runs.
+          verdict="$RUNNER_TEMP/audit-verdict.mjs"
+          cat > "$verdict" <<'VERDICT'
+          // 0 clean - 1 a high or critical advisory, listed - 2 no report to read.
+          import { readFileSync } from "node:fs";
+          let report;
+          try {
+            report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          } catch {
+            process.exit(2);
+          }
+          if (!report.auditReportVersion) process.exit(2);
+
+          const counts = report.metadata?.vulnerabilities ?? {};
+          console.log(`advisories by severity: ${JSON.stringify(counts)}`);
+          const blocking = [];
+          for (const [name, found] of Object.entries(report.vulnerabilities ?? {})) {
+            if (found.severity !== "high" && found.severity !== "critical") continue;
+            const why = (found.via ?? [])
+              .map((entry) => (typeof entry === "string" ? entry : entry.title))
+              .filter(Boolean)
+              .join("; ");
+            blocking.push(`  ${found.severity}  ${name}  ${why}`);
+          }
+          for (const line of blocking.sort()) console.log(line);
+          process.exit(blocking.length > 0 ? 1 : 0);
+          VERDICT
+
           for attempt in 1 2 3 4 5; do
-            if npm audit --omit=dev --audit-level=high --fetch-timeout=90000 >"$RUNNER_TEMP/audit.log" 2>&1; then
-              cat "$RUNNER_TEMP/audit.log"
-              exit 0
-            fi
-            cat "$RUNNER_TEMP/audit.log"
-            if ! grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log"; then
-              exit 1
-            fi
-            echo "::warning::npm's advisory endpoint did not answer within 90 s (attempt $attempt of 5)."
+            npm audit --omit=dev --audit-level=high --json \
+              --fetch-timeout=90000 --fetch-retries=0 \
+              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err"
+            node "$verdict" "$RUNNER_TEMP/audit.json"
+            case $? in
+              0) exit 0 ;;
+              1) echo "::error::This tree carries a high or critical advisory (listed above). It may predate this PR — check before treating it as a blocker."; exit 1 ;;
+            esac
+            echo "attempt $attempt of 5: the advisory endpoint did not answer within 90 s."
+            sed -n '1,15p' "$RUNNER_TEMP/audit.err"
+            [ "$attempt" -lt 5 ] && sleep $((attempt * 10))
           done
-          echo "::error::npm's advisory endpoint did not answer in five attempts. Nothing was audited; re-run the job once registry.npmjs.org recovers."
-          exit 1
+
+          # A registry that never answered is not a clean tree — and it is not
+          # a finding either. Failing here would wedge every lockfile PR on
+          # somebody else's outage, which is the wedge this job's own design
+          # goes out of its way to avoid; on 2026-09-04 it did exactly that for
+          # eight consecutive attempts. The nightly audit below is the alarm,
+          # and it DOES fail, so the gap this leaves is at most a day.
+          echo "::warning::The advisory endpoint did not answer in five attempts, so nothing was audited. The nightly audit in muk-scheduled-checks.yml still covers this tree."
 
   rules:
     name: Project rules

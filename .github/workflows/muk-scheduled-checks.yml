@@ -397,24 +397,67 @@ jobs:
         run: npm ci
 
       # The same retry loop as muk-ci.yml's deps-audit job, for the same
-      # reason: the advisory endpoint drops a fair share of requests past
-      # npm's 5-minute fetch timeout, and a nightly alarm that fires on the
-      # registry's bad day is one the owner learns to ignore. Only the endpoint
-      # failure is retried; an advisory fails the first attempt.
+      # reason: the advisory endpoint drops a fair share of requests past npm's
+      # 5-minute fetch timeout, and an alarm that fires on the registry's bad
+      # night is one the owner learns to ignore. It ends differently, though —
+      # see the comment on the last line.
       - name: Audit production dependencies
         run: |
+          # npm cannot tell these apart: it exits 1 both for "this tree carries a
+          # high advisory" and for "the registry did not answer", and those need
+          # opposite responses. `auditReportVersion` is on every real report and
+          # on no error payload, so it is the one honest signal — matching npm's
+          # wording instead would turn a reworded error into an instant red.
+          #
+          # Written out here rather than committed beside this workflow because
+          # a reusable workflow runs in the CALLER's checkout: a file shipped in
+          # this repository would not exist when the step runs.
+          verdict="$RUNNER_TEMP/audit-verdict.mjs"
+          cat > "$verdict" <<'VERDICT'
+          // 0 clean - 1 a high or critical advisory, listed - 2 no report to read.
+          import { readFileSync } from "node:fs";
+          let report;
+          try {
+            report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          } catch {
+            process.exit(2);
+          }
+          if (!report.auditReportVersion) process.exit(2);
+
+          const counts = report.metadata?.vulnerabilities ?? {};
+          console.log(`advisories by severity: ${JSON.stringify(counts)}`);
+          const blocking = [];
+          for (const [name, found] of Object.entries(report.vulnerabilities ?? {})) {
+            if (found.severity !== "high" && found.severity !== "critical") continue;
+            const why = (found.via ?? [])
+              .map((entry) => (typeof entry === "string" ? entry : entry.title))
+              .filter(Boolean)
+              .join("; ");
+            blocking.push(`  ${found.severity}  ${name}  ${why}`);
+          }
+          for (const line of blocking.sort()) console.log(line);
+          process.exit(blocking.length > 0 ? 1 : 0);
+          VERDICT
+
           for attempt in 1 2 3 4 5; do
-            if npm audit --omit=dev --audit-level=high --fetch-timeout=90000 >"$RUNNER_TEMP/audit.log" 2>&1; then
-              cat "$RUNNER_TEMP/audit.log"
-              exit 0
-            fi
-            cat "$RUNNER_TEMP/audit.log"
-            if ! grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log"; then
-              exit 1
-            fi
-            echo "::warning::npm's advisory endpoint did not answer within 90 s (attempt $attempt of 5)."
+            npm audit --omit=dev --audit-level=high --json \
+              --fetch-timeout=90000 --fetch-retries=0 \
+              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err"
+            node "$verdict" "$RUNNER_TEMP/audit.json"
+            case $? in
+              0) exit 0 ;;
+              1) echo "::error::A high or critical advisory affects a production dependency (listed above)."; exit 1 ;;
+            esac
+            echo "attempt $attempt of 5: the advisory endpoint did not answer within 90 s."
+            sed -n '1,15p' "$RUNNER_TEMP/audit.err"
+            [ "$attempt" -lt 5 ] && sleep $((attempt * 10))
           done
-          echo "::error::npm's advisory endpoint did not answer in five attempts. Nothing was audited; re-run the job once registry.npmjs.org recovers."
+
+          # The opposite ending to the PR gate's, deliberately. This is the
+          # alarm rather than a gate: nothing is waiting on it, and an alarm
+          # that quietly did not run is worse than one that goes off on a bad
+          # night at the registry.
+          echo "::error::The advisory endpoint did not answer in five attempts, so this tree was NOT audited tonight."
           exit 1
 
   # The full Lighthouse audit — and, since the per-PR perf job was retired, its
