@@ -295,7 +295,8 @@ jobs:
     name: Dependency audit (lockfile PRs)
     if: github.event_name == 'pull_request'
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 10
+    # Five 90-second attempts against the advisory endpoint, plus checkout.
+    timeout-minutes: 12
     steps:
       - name: What this job is for
         run: |
@@ -304,7 +305,7 @@ jobs:
 
           Blocks a pull request that INTRODUCES a known-vulnerable production dependency. It audits only when the branch touches `package-lock.json`, so an advisory published mid-flight can never wedge unrelated pull requests.
 
-          ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker.
+          ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker. If the log ends in "advisory endpoint did not answer", nothing was audited: registry.npmjs.org is the problem, re-run the job.
           TLDR
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -330,7 +331,29 @@ jobs:
           # too, not only ones this PR introduces. Such an advisory would have
           # failed the nightly audit within a day anyway — fixing it unblocks
           # both alarms at once.
-          npm audit --omit=dev --audit-level=high
+          #
+          # The advisory endpoint answers with a heavy tail. On 2026-09-04 the
+          # same byte-identical request took between 1 s and 71 s when it was
+          # served and blew npm's 5-minute fetch timeout on six CI attempts in a
+          # row (muk.events #1169), from the same machine, minutes apart. One
+          # request is a coin toss, so make several short ones. Only the
+          # endpoint failure is retried: a reported advisory exits 1 without
+          # that line and fails on the first attempt, so a red here still means
+          # what the summary says. The nightly audit in muk-scheduled-checks.yml
+          # carries the same loop.
+          for attempt in 1 2 3 4 5; do
+            if npm audit --omit=dev --audit-level=high --fetch-timeout=90000 >"$RUNNER_TEMP/audit.log" 2>&1; then
+              cat "$RUNNER_TEMP/audit.log"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/audit.log"
+            if ! grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log"; then
+              exit 1
+            fi
+            echo "::warning::npm's advisory endpoint did not answer within 90 s (attempt $attempt of 5)."
+          done
+          echo "::error::npm's advisory endpoint did not answer in five attempts. Nothing was audited; re-run the job once registry.npmjs.org recovers."
+          exit 1
 
   rules:
     name: Project rules

@@ -396,8 +396,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The same retry loop as muk-ci.yml's deps-audit job, for the same
+      # reason: the advisory endpoint drops a fair share of requests past
+      # npm's 5-minute fetch timeout, and a nightly alarm that fires on the
+      # registry's bad day is one the owner learns to ignore. Only the endpoint
+      # failure is retried; an advisory fails the first attempt.
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if npm audit --omit=dev --audit-level=high --fetch-timeout=90000 >"$RUNNER_TEMP/audit.log" 2>&1; then
+              cat "$RUNNER_TEMP/audit.log"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/audit.log"
+            if ! grep -q 'audit endpoint returned an error' "$RUNNER_TEMP/audit.log"; then
+              exit 1
+            fi
+            echo "::warning::npm's advisory endpoint did not answer within 90 s (attempt $attempt of 5)."
+          done
+          echo "::error::npm's advisory endpoint did not answer in five attempts. Nothing was audited; re-run the job once registry.npmjs.org recovers."
+          exit 1
 
   # The full Lighthouse audit — and, since the per-PR perf job was retired, its
   # sole enforcing home. muk-ci.yml's PR gate is now a fast, deterministic
