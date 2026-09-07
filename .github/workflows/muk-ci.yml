@@ -824,16 +824,66 @@ jobs:
           Not covered here: app code incompatible with the *currently deployed* schema or edge functions. That used to fail here when the suite ran against production; it now surfaces on the main run and the post-deploy asserts.
           TLDR
 
+      # fetch-depth: 0, because the scope step below diffs against the merge
+      # base. The self-hosted pool keeps a warm checkout, so this is an
+      # incremental fetch there; a Dependabot PR pays a full clone once.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
 
+      # CAN THE RUNNING APP SEE THIS CHANGE AT ALL?
+      #
+      # The caller's own map answers it — `muk-map.mjs scope`, the same module
+      # its `pre-pr` asks before running the suite locally, so the two gates
+      # cannot disagree about what was tested. A change reaches the app only
+      # through the app's import graph, plus the build inputs, the schema and
+      # the specs, which no import edge can model.
+      #
+      # When it reaches none of that, every step below is skipped and the JOB
+      # STILL SUCCEEDS. That matters: the required gate is fail-closed on a
+      # SKIPPED job, and it stays that way — this is a job that ran and had
+      # nothing to do, not a job that never ran.
+      #
+      # A caller without the command (an older checkout, another app) gets
+      # `needed=true` and the full suite, so this is not a breaking change.
+      - name: Does this change reach the running app?
+        id: scope
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ ! -f scripts/muk-map.mjs ] || [ ! -f muk-map.json ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "This caller has no map; running the suite."
+            exit 0
+          fi
+          node scripts/muk-map.mjs scope \
+            --base="${{ github.event.pull_request.base.sha }}" \
+            --head="${{ github.event.pull_request.head.sha }}" || {
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::The scope query failed; running the suite."
+            }
+
+      - name: Nothing here reaches the running app
+        if: ${{ steps.scope.outputs.needed != 'true' }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<TLDR
+          #### Playwright e2e (lane) — nothing to run
+
+          No file this pull request changes is reachable from the app's own import graph, and none of them is a build input, a schema or edge-function change, or a browser spec. \`muk-map.mjs scope\` said so, and the caller's \`pre-pr\` said the same thing before the push.
+
+          The suite would have measured a picture nobody changed. The golden flows still run against \`main\` nightly.
+          TLDR
+          echo "Skipped: ${{ steps.scope.outputs.reason }}"
+
       # Same pin the rules and migrations jobs already use — one CLI version
       # across the workflow, not two.
       - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         with:
           version: latest
 
@@ -843,6 +893,7 @@ jobs:
       # launchd runner's PATH is minimal.
       - name: Ensure a container runtime
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: |
           set -uo pipefail
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -899,9 +950,11 @@ jobs:
           fi
 
       - name: Install dependencies
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: npm ci --ignore-scripts
 
       - name: Install Playwright browsers
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: npx playwright install --with-deps chromium
 
       # WHICH LANE? The runner's own name, because a runner executes one job at
@@ -912,6 +965,7 @@ jobs:
       - name: Pick this runner's lane
         id: lane
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: |
           set -euo pipefail
           case "${RUNNER_NAME:-}" in
@@ -930,6 +984,7 @@ jobs:
       - name: Bring up the lane
         id: stack
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: |
           set -uo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
@@ -944,6 +999,7 @@ jobs:
       # `next start` servers coexist on this box.
       - name: Point the suite at the lane
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: |
           set -euo pipefail
           node scripts/stack-lane.mjs env "${{ steps.lane.outputs.lane }}" --plain >> "$GITHUB_ENV"
@@ -952,6 +1008,7 @@ jobs:
       # run left behind. Lanes make that per-lane rather than machine-wide.
       - name: Free the lane's app port
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
       # visual-chromium is EXCLUDED on Linux, and this is not a convenience.
@@ -966,6 +1023,7 @@ jobs:
       - name: Run the browser suite
         id: suite
         shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
         run: |
           set -uo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
@@ -992,7 +1050,7 @@ jobs:
           exit "$code"
 
       - name: Add Playwright results to run summary
-        if: ${{ always() }}
+        if: ${{ always() && steps.scope.outputs.needed == 'true' }}
         run: node scripts/write-ci-summary.mjs playwright .playwright-results.json
 
       # The stack is reused between runs on purpose (see the note below the
@@ -1010,7 +1068,7 @@ jobs:
       # detection lives in muk.events' own preflight, which local developers
       # run too; the recovery lives here, because this job owns the machine.
       - name: Recycle a wedged lane
-        if: ${{ always() && (steps.suite.outputs.exit-code == '78' || steps.stack.outputs.exit-code == '78') }}
+        if: ${{ always() && steps.scope.outputs.needed == 'true' && (steps.suite.outputs.exit-code == '78' || steps.stack.outputs.exit-code == '78') }}
         shell: bash
         run: |
           set -uo pipefail
@@ -1032,7 +1090,7 @@ jobs:
       # state. What does get cleaned is the app server, which would otherwise
       # hold the port.
       - name: Release the lane's app port
-        if: ${{ always() }}
+        if: ${{ always() && steps.scope.outputs.needed == 'true' }}
         shell: bash
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
