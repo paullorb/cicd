@@ -49,6 +49,21 @@ on:
         required: false
         default: true
         type: boolean
+      artifact_retention_days:
+        description: >-
+          How long the unsigned archives are kept. Defaults to 7, so an
+          existing caller sees no change.
+
+          Worth passing a shorter one for pull requests. The archives are small
+          (~4 MB each) but they arrive in PAIRS on every run, and on a busy
+          repository a week of them is the largest thing in a shared storage
+          allowance — muk.events measured 120 live archives at 465 MB against a
+          0.5 GB account allowance in September 2026. Nobody has ever opened a
+          PR's archive the day after; a Release-triggered one is the one a store
+          submission is built from, and keeps the full window.
+        required: false
+        default: 7
+        type: number
       # Runner routing, as JSON so a caller can pass either a label string
       # ('"macos-15"') or a label array ('["self-hosted","muk-ci"]'). The
       # defaults are the hosted images this workflow has always used, so an
@@ -121,12 +136,14 @@ jobs:
           name: android-release-unsigned
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
-          # Seven days, not fourteen: two archives per run at ~3.7 MB each
-          # add up fast on a shared storage allowance, and nobody has ever
-          # needed one older than the week it was built in. A release archive
-          # that must outlive that window is downloaded and kept deliberately,
-          # which is the honest way to keep one anyway.
-          retention-days: 7
+          # Two archives per run at ~3.7 MB each add up fast on a shared
+          # storage allowance, and nobody has ever needed one older than the
+          # week it was built in. An archive that must outlive its window is
+          # downloaded and kept deliberately, which is the honest way to keep
+          # one anyway. The upload itself stays unconditional: `if-no-files-
+          # found: error` is the assertion that the build produced the file,
+          # and that is worth most on the runs there are most of.
+          retention-days: ${{ inputs.artifact_retention_days }}
 
   ios:
     if: inputs.build_ios
@@ -178,9 +195,6 @@ jobs:
           name: ios-release-unsigned
           path: ${{ runner.temp }}/App-unsigned.xcarchive
           if-no-files-found: error
-          # Seven days, not fourteen: two archives per run at ~3.7 MB each
-          # add up fast on a shared storage allowance, and nobody has ever
-          # needed one older than the week it was built in. A release archive
-          # that must outlive that window is downloaded and kept deliberately,
-          # which is the honest way to keep one anyway.
-          retention-days: 7
+          # See the Android upload above: the window is the caller's, the
+          # upload is not conditional.
+          retention-days: ${{ inputs.artifact_retention_days }}
