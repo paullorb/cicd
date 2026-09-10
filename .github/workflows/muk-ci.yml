@@ -1258,10 +1258,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '{"ref":"%s","environment":"production-backend","auto_merge":false,"required_contexts":[],"description":"Supabase migrations + edge functions"}' "$GITHUB_SHA" \
-            | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id"
-          gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
-            -f state=success -f description="Deployed by run $GITHUB_RUN_ID"
+          # Bookkeeping, not a gate: this backend deploy already landed, and
+          # deploy-app needs this JOB to succeed to run at all. A transient
+          # GitHub API blip (a 504 hit main on 2026-09-02) must not skip the
+          # real deploy behind a metrics record — so this retries a few times
+          # and, failing that, warns rather than fails.
+          record() {
+            printf '{"ref":"%s","environment":"production-backend","auto_merge":false,"required_contexts":[],"description":"Supabase migrations + edge functions"}' "$GITHUB_SHA" \
+              | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
+              && gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+                   -f state=success -f description="Deployed by run $GITHUB_RUN_ID"
+          }
+          for attempt in 1 2 3; do
+            record && exit 0
+            echo "::warning::DORA deployment record attempt $attempt failed (GitHub API)."
+            sleep $((attempt * 5))
+          done
+          echo "::warning::Could not record the DORA deployment after 3 attempts — the backend deploy itself succeeded; only the metrics dashboard is missing this row."
 
   # ---------------------------------------------------------------------------
   # Frontend delivery, gated on CI. Historically Vercel's own git integration
@@ -1431,10 +1444,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"Next.js app on Vercel"}' "$GITHUB_SHA" \
-            | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id"
-          gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
-            -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
+          # Bookkeeping, not a gate: the domain already proved it serves this
+          # commit, and post-deploy-smoke needs this JOB to succeed to run at
+          # all. A transient GitHub API blip (a 504 hit main on 2026-09-02)
+          # must not skip the real smoke check behind a metrics record — so
+          # this retries a few times and, failing that, warns rather than
+          # fails.
+          record() {
+            printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"Next.js app on Vercel"}' "$GITHUB_SHA" \
+              | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
+              && gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+                   -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
+          }
+          for attempt in 1 2 3; do
+            record && exit 0
+            echo "::warning::DORA deployment record attempt $attempt failed (GitHub API)."
+            sleep $((attempt * 5))
+          done
+          echo "::warning::Could not record the DORA deployment after 3 attempts — the app deploy itself succeeded; only the metrics dashboard is missing this row."
 
   # ---------------------------------------------------------------------------
   # The only thing that exercises an AUTHENTICATED production flow after a
