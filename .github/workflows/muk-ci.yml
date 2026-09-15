@@ -957,6 +957,31 @@ jobs:
         if: ${{ steps.scope.outputs.needed == 'true' }}
         run: npx playwright install --with-deps chromium
 
+      # Lanes isolate the database, not the CPU. When somebody runs something
+      # heavy on this Mac, the browser suite slows and flakes, and the failure
+      # reads as the branch's fault. Say what the box is carrying, then wait
+      # while it is over twice its core count. It never refuses: a job that
+      # declines is worse than a slow one, the same rule pre-pr follows
+      # (muk.events #1479). MUK_BOX_LOAD_WAIT=0 skips the wait.
+      - name: What the box is carrying
+        id: box
+        shell: bash
+        if: ${{ steps.scope.outputs.needed == 'true' }}
+        env:
+          MUK_BOX_LOAD_WAIT: "600"
+        run: |
+          set -uo pipefail
+          line="$(node scripts/box-load.mjs --wait 2>&1 | tail -20)" || true
+          echo "$line"
+          {
+            echo "<details><summary>What the box was carrying when this job started</summary>"
+            echo
+            echo '```'
+            echo "$line"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # WHICH LANE? The runner's own name, because a runner executes one job at
       # a time — so a lane pinned to it is exclusive without any lock, and two
       # jobs on two runners can never pick the same one. `tostinn-mac-local-3`
@@ -1067,6 +1092,16 @@ jobs:
       # run a cold start, and a wedged STACK must not be handed on. The
       # detection lives in muk.events' own preflight, which local developers
       # run too; the recovery lives here, because this job owns the machine.
+      # A red suite is read before anything else, so the load at that moment
+      # belongs in the same place. A run that failed at load 40 on 14 cores is
+      # a different conversation from one that failed on an idle box.
+      - name: What the box was carrying when this failed
+        if: ${{ failure() && steps.scope.outputs.needed == 'true' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "> **Box at the moment this failed:** $(node scripts/box-load.mjs 2>&1 | tail -1)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Recycle a wedged lane
         if: ${{ always() && steps.scope.outputs.needed == 'true' && (steps.suite.outputs.exit-code == '78' || steps.stack.outputs.exit-code == '78') }}
         shell: bash
