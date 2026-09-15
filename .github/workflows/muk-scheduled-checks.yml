@@ -366,6 +366,49 @@ jobs:
           fi
           node scripts/assert-promo-pipeline.mjs
 
+  # Nothing read the error rows the app writes until this job existed. The two
+  # error boundaries post `app.crashed` and instrumentation.ts posts
+  # `app.action_failed` when a server action throws; both landed in the table
+  # and were seen only by whoever happened to open the observation panel. The
+  # July resilience audit's "nothing watches production" was about exactly this
+  # gap: uptime was covered by the heartbeat, the smoke test and the dead-man
+  # switch, and errors were covered by nobody. Same posture as the alignment
+  # canary above, and no npm ci for the same reason: the script imports nothing
+  # but Node's own.
+  production-errors:
+    name: Production errors (crashes and failed actions)
+    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Production errors (crashes and failed actions)
+
+          Counts the error rows production wrote in the last 24 hours — a screen that showed "Das hat leider nicht geklappt", and a server action that threw where the member could only be told a code — against the worst day of the month behind them.
+
+          **Green means** the app broke no more often than it already has. The counts are printed either way; the previous 24 hours are the line worth reading.
+
+          **Red means** a kind is past its ceiling: twice its own worst day of the previous 30, and never fewer than three. The digest on each row is the same code the member was shown and the server log line carries.
+          TLDR
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Production broke no more often than it ever has
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_SERVICE_ROLE_KEY not set — the nightly production-error canary cannot run."
+            exit 1
+          fi
+          node scripts/assert-production-errors.mjs
+
   # The blanket net for e2e debris. The per-run sweep in ci.yml/browser-matrix
   # deletes a run's own events immediately, but a runner killed too hard for
   # even `if: always()` leaves them behind — this catches those within a day.
