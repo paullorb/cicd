@@ -469,7 +469,8 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        # Install scripts do not run on the box (muk.events#1484, hole 4).
+        run: npm ci --ignore-scripts
 
       # The same retry loop as muk-ci.yml's deps-audit job, for the same
       # reason: the advisory endpoint drops a fair share of requests past npm's
@@ -600,7 +601,8 @@ jobs:
 
       - name: Install dependencies
         if: steps.creds.outputs.ok == 'true'
-        run: npm ci
+        # Install scripts do not run on the box (muk.events#1484, hole 4).
+        run: npm ci --ignore-scripts
 
       - name: Build
         if: steps.creds.outputs.ok == 'true'
@@ -728,7 +730,8 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        # Install scripts do not run on the box (muk.events#1484, hole 4).
+        run: npm ci --ignore-scripts
 
       - name: Measure duplication, dead code and unused CSS
         run: node scripts/measure-code-efficiency.mjs
@@ -789,7 +792,8 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        # Install scripts do not run on the box (muk.events#1484, hole 4).
+        run: npm ci --ignore-scripts
 
       - name: Measure shared-primitive adoption and escape hatches
         run: node scripts/measure-code-consistency.mjs
@@ -855,7 +859,8 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        # Install scripts do not run on the box (muk.events#1484, hole 4).
+        run: npm ci --ignore-scripts
 
       - name: Measure every user-facing string
         run: node scripts/measure-copy-quality.mjs
