@@ -49,6 +49,19 @@ on:
         required: false
         default: true
         type: boolean
+      npm_ignore_scripts:
+        description: >-
+          Install with `--ignore-scripts`. Defaults to false, so an existing
+          caller sees no change — a repository whose build depends on a
+          postinstall (patch-package and friends) keeps working.
+
+          Pass true when the archive is built on a persistent machine, where a
+          dependency's install script would run as the runner's own user
+          (paullorb/muk.events#1484, hole 4). It also skips the caller's own
+          `prepare`, which CI does not need: it never pushes and never rebases.
+        required: false
+        default: false
+        type: boolean
       artifact_retention_days:
         description: >-
           How long the unsigned archives are kept. Defaults to 7, so an
@@ -108,7 +121,7 @@ jobs:
 
       - name: Install dependencies and sync Capacitor
         run: |
-          npm ci
+          npm ci ${{ inputs.npm_ignore_scripts && '--ignore-scripts' || '' }}
           npx cap sync android
 
       - name: Build unsigned Android artifacts
@@ -159,7 +172,7 @@ jobs:
 
       - name: Install dependencies and sync Capacitor
         run: |
-          npm ci
+          npm ci ${{ inputs.npm_ignore_scripts && '--ignore-scripts' || '' }}
           npx cap sync ios
 
       - name: Build unsigned iOS archive
