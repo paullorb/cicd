@@ -227,7 +227,16 @@ jobs:
         with:
           name: playwright-report-browser-matrix
           path: playwright-report/
-          retention-days: 7
+          # Three days, not seven. This report is failure debris — it is
+          # uploaded on every run but weighs ~200 MB only when the suite is
+          # red, and one red week was 40% of the caller's whole shared-storage
+          # allowance on its own (muk.events#1400, measured 2026-09-15). The
+          # suite runs weekly and the canary files its issue the next morning,
+          # so three days covers the triage that actually happens and
+          # guarantees the report is gone before the next week's run replaces
+          # it. A report worth keeping past that is downloaded, which is the
+          # honest way to keep one.
+          retention-days: 3
 
       # Same run-scoped sweep as ci.yml — see the comment there. One job per
       # run now, so this sweep can only ever catch this run's own debris.
