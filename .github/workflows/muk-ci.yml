@@ -434,7 +434,26 @@ jobs:
           [ -n "$SUPABASE_DB_URL" ] || missing="$missing SUPABASE_DB_URL"
           [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
           if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing — every check in this job would silently pass while enforcing nothing. On a Dependabot PR this means the Actions secrets have not been mirrored to Dependabot secrets (gh secret set <NAME> --app dependabot)."
+            # A Dependabot run is served the Dependabot secret store, so this is
+            # expected and says so: the red is the handover, not a fault in the
+            # bump. Mirroring the secrets across would answer it and is exactly
+            # what must not happen (muk.events AGENTS.md), so the message no
+            # longer suggests it.
+            if [ "${GITHUB_ACTOR:-}" = "dependabot[bot]" ]; then
+              echo "::error::Expected on a Dependabot run:$missing are not visible to it, so this job can enforce nothing and refuses to report green. A run under a normal identity follows and is the one that counts. Do NOT mirror these into the Dependabot secret store."
+              {
+                echo "### This red is the Dependabot handover"
+                echo
+                echo "A run triggered by Dependabot is served the *Dependabot* secret store, so"
+                echo "\`$missing\` are invisible here. This job would otherwise pass while checking"
+                echo "nothing, so it fails instead."
+                echo
+                echo "**Nothing is wrong with the dependency bump.** The run that decides this pull"
+                echo "request is the next one, started under a normal identity."
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::Missing secret(s):$missing — every check in this job would silently pass while enforcing nothing. A secret has been rotated, renamed or deleted; restore it before merging anything."
+            fi
             exit 1
           fi
 
@@ -544,7 +563,19 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
-            echo "::error::Missing secret SUPABASE_ACCESS_TOKEN — the edge-function sync check would silently skip. On a Dependabot PR, mirror the Actions secrets to Dependabot secrets."
+            # See the identical reasoning in the rules job above.
+            if [ "${GITHUB_ACTOR:-}" = "dependabot[bot]" ]; then
+              echo "::error::Expected on a Dependabot run: SUPABASE_ACCESS_TOKEN is not visible to it, so this check would silently skip. The run under a normal identity that follows is the one that counts. Do NOT mirror it into the Dependabot secret store."
+              {
+                echo "### This red is the Dependabot handover"
+                echo
+                echo "A run triggered by Dependabot cannot see \`SUPABASE_ACCESS_TOKEN\`, so this"
+                echo "check would skip while reporting green. Nothing is wrong with the dependency"
+                echo "bump; the next run decides this pull request."
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::Missing secret SUPABASE_ACCESS_TOKEN — the edge-function sync check would silently skip. It has been rotated, renamed or deleted; restore it."
+            fi
             exit 1
           fi
 
