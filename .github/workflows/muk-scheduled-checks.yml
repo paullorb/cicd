@@ -114,7 +114,7 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
         with:
           version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
 
@@ -168,7 +168,7 @@ jobs:
             echo "::error::SUPABASE_ACCESS_TOKEN not set — the nightly types check cannot run."
             exit 1
           fi
-          npx --yes supabase@2.105.0 gen types typescript \
+          supabase gen types typescript \
             --project-id "$SUPABASE_PROJECT_REF" --schema muk > /tmp/supabase.ts
           if ! diff -u types/supabase.ts /tmp/supabase.ts; then
             echo "::error::types/supabase.ts is stale. Run 'npm run gen:types' and commit the result."
