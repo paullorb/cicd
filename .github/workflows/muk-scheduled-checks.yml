@@ -114,9 +114,7 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
-        with:
-          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+      - uses: ./.github/actions/supabase-cli # the version muk.events pins in .supabase-cli-version
 
       # STRICT: by nightly, every merged migration should long since have
       # deployed — anything unapplied here is a genuinely lost deploy.

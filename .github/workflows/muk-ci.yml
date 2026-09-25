@@ -514,10 +514,8 @@ jobs:
       # nightly run re-checks strictly once the deploy has landed.
       # A custom `if:` drops the implicit success() guard, so without it this
       # step would still run after the drift step above failed. Keep success().
-      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
+      - uses: ./.github/actions/supabase-cli # the version muk.events pins in .supabase-cli-version
         if: success() && (steps.drift.outputs.pending == '' || steps.drift.outputs.pending == '0')
-        with:
-          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN
 
       - name: types/supabase.ts matches the prod schema
         if: success() && (steps.drift.outputs.pending == '' || steps.drift.outputs.pending == '0')
@@ -594,9 +592,7 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
-        with:
-          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+      - uses: ./.github/actions/supabase-cli # the version muk.events pins in .supabase-cli-version
 
       # No migration-drift step here any more: `rules` runs the very same
       # scripts/check-migration-drift.mjs against the very same prod database
@@ -916,12 +912,9 @@ jobs:
           TLDR
           echo "Skipped: ${{ steps.scope.outputs.reason }}"
 
-      # Same pin the rules and migrations jobs already use — one CLI version
-      # across the workflow, not two.
-      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
+      # One CLI version across every job, pinned in muk.events.
+      - uses: ./.github/actions/supabase-cli # the version muk.events pins in .supabase-cli-version
         if: ${{ steps.scope.outputs.needed == 'true' }}
-        with:
-          version: latest
 
       # The stack needs a container runtime. Linux runners ship Docker; the
       # self-hosted macOS pool uses Colima, which is a user-level VM and may not
@@ -1257,9 +1250,7 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - uses: ./.github/actions/supabase-cli # muk.events: setup-cli, re-signed on macOS
-        with:
-          version: 2.105.0 # pinned — this binary holds SUPABASE_ACCESS_TOKEN / the prod DB URL
+      - uses: ./.github/actions/supabase-cli # the version muk.events pins in .supabase-cli-version
 
       - name: Push migrations
         env:
