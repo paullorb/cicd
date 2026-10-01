@@ -653,6 +653,20 @@ jobs:
         if: ${{ always() && steps.creds.outputs.ok == 'true' }}
         run: node scripts/write-ci-summary.mjs lighthouse .lighthouseci
 
+      # The reports themselves, so a red night can name its failing audit: the
+      # summary above carries scores, and a best-practices miss is unreadable
+      # without the audit list (muk.events#1836). JSON only (the HTML copies
+      # are most of the weight) and three days, for the same storage reason as
+      # the Playwright report in muk-browser-matrix.yml.
+      - name: Upload Lighthouse reports
+        if: ${{ always() && steps.creds.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lighthouse-reports
+          path: .lighthouseci/*.json
+          retention-days: 3
+          if-no-files-found: ignore
+
   # The four DORA metrics over the trailing 30 days, computed from data the
   # pipeline already produces: GitHub Deployments (recorded by muk-ci.yml's
   # deploy jobs), merged PRs, and main-branch CI runs. Pure reporting — it
