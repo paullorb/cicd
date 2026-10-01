@@ -665,7 +665,11 @@ jobs:
           name: lighthouse-reports
           path: .lighthouseci/*.json
           retention-days: 3
-          if-no-files-found: ignore
+          # `.lighthouseci` is a hidden directory and upload-artifact skips
+          # hidden files by default, so without this the glob matched nothing.
+          include-hidden-files: true
+          # A missing report is the thing this step exists to prevent: say so.
+          if-no-files-found: warn
 
   # The four DORA metrics over the trailing 30 days, computed from data the
   # pipeline already produces: GitHub Deployments (recorded by muk-ci.yml's
