@@ -547,6 +547,11 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # The staleness check asks whether the base branch's own pipeline is
+      # still running (muk.events#1841). The caller must grant it too.
+      actions: read
     steps:
       - name: What this job is for
         run: |
@@ -608,6 +613,11 @@ jobs:
           # The PR's own function changes deploy on merge; only the base
           # branch's sources must already be live.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # The base head can be a merge whose own pipeline has not reached
+          # its deploy job yet: pending, not stranded. The script asks the
+          # base branch's runs (muk.events#1841). Needs actions: read from
+          # the caller, and reads as before without it.
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
             echo "::notice::SUPABASE_ACCESS_TOKEN not set — skipping the edge function sync check."
