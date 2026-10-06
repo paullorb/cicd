@@ -93,3 +93,10 @@ archive in every cache-enabled job.
 Deploy jobs remain ordered inside `muk-ci.yml`: quality, rules, migration
 replay, and Playwright must pass before migrations deploy, followed by edge
 functions.
+
+## Operator scripts
+
+`scripts/rotate-keys.py` rotates the Supabase secret keys and `MUK_CRON_SECRET`
+across muk.events and paullorber in one pass (Vercel envs, redeploy, webhook
+row, live probe). It lives here because it spans both repos; run it by hand
+with `python3 scripts/rotate-keys.py`. It prints and stores no secrets.
