@@ -36,7 +36,13 @@ name: PR overlap
 # warned, which is the very shape this exists to name. So a run now rewrites
 # the comment on every other open pull request that shares a file with this
 # one, from the current state of all of them, and a caller that also passes
-# the `closed` event has those comments cleared when this one merges.
+# the `closed` event has those comments cleared when this one merges. A pull
+# request whose comment names this one is rewritten too, so one that stops
+# overlapping after a push drops out of the other's list. Two runs can still
+# race on one comment (each caller serializes per pull request, not per
+# repository); the next rewrite of that comment keeps the first and deletes
+# the rest, which is cheaper than a repository-wide concurrency group that
+# would cancel a pending run and lose a pull request's own update.
 #
 # IT NEVER FAILS THE PULL REQUEST
 #
@@ -158,8 +164,18 @@ jobs:
             # Streamed per element rather than aggregated: --paginate applies the
             # expression to each page separately, so a `map(...) | .[0]` would
             # answer once PER PAGE and a long thread would yield several ids.
-            existing="$(gh api --paginate "repos/$GH_REPO/issues/$number/comments" \
-              --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)"
+            existing=""
+            for id in $(gh api --paginate "repos/$GH_REPO/issues/$number/comments" \
+              --jq '.[] | select(.body | contains(env.MARKER)) | .id'); do
+              if [ -z "$existing" ]; then
+                existing="$id"
+              else
+                # Two runs for two overlapping pull requests raced on this one
+                # and each posted a comment: the first is kept, the rest go.
+                gh api -X DELETE "repos/$GH_REPO/issues/comments/$id" >/dev/null \
+                  || echo "::warning::Could not delete a duplicate overlap comment on #$number."
+              fi
+            done
 
             if [ "$found" -eq 0 ]; then
               if [ "$number" = "$PR" ]; then
@@ -213,15 +229,18 @@ jobs:
 
           # Then every open pull request that shares a file with this one, so
           # the one opened first is told about the one opened second, and one
-          # that just closed drops out of the others' lists.
+          # that just closed drops out of the others' lists. One whose comment
+          # names this pull request is rewritten too: a push here that stopped
+          # touching the shared file must take this one off its list.
+          export NAMED="#### #$PR —"
+          names_me() {
+            [ -n "$(gh api --paginate "repos/$GH_REPO/issues/$1/comments" \
+              --jq '.[] | select(.body | contains(env.MARKER)) | select(.body | contains(env.NAMED)) | .id' | head -1)" ]
+          }
           mine="$(files_of "$PR")"
-          if [ -z "$mine" ]; then
-            echo "This pull request changes no files that count."
-            exit 0
-          fi
           while IFS=$'\t' read -r other _; do
             if [ -z "$other" ] || [ "$other" = "$PR" ]; then continue; fi
             shared="$(comm -12 <(printf '%s\n' "$mine") <(files_of "$other"))"
-            [ -z "$shared" ] && continue
+            if [ -z "$shared" ] && ! names_me "$other"; then continue; fi
             report "$other"
           done < "$open_file"
