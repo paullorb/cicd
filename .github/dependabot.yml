@@ -1,0 +1,46 @@
+version: 2
+
+# This repository is the one place every other repo's pipeline comes from, and
+# its own workflows pin every action by full commit SHA — which is the right
+# call and means nothing updates them unless something does it on purpose.
+# Nothing did: there was no dependabot.yml here at all.
+#
+# A stale SHA is not a theoretical cost. self-check.yml holds the actionlint
+# download and its checksum, app-vercel.yml and app-native-build.yml hold
+# deploy credentials, and the consumer repos run all of it. An action pinned to
+# a commit from months ago keeps running that commit, including whatever was
+# wrong with it.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # An action runs on the box with the calling job's own reach, so a freshly
+    # published SHA is exactly the thing not to adopt within hours of publish.
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # One devDependency: js-yaml, pinned EXACTLY and installed with `npm ci
+  # --ignore-scripts` because check-workflows.mjs is the careful job and a
+  # parser it trusts is not a place for a range. Dependabot keeps an exact pin
+  # exact, so a bump arrives as a reviewable version change rather than a
+  # lockfile drifting underneath the integrity hash.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      routine:
+        patterns:
+          - "*"
