@@ -1,0 +1,183 @@
+name: PR overlap
+
+# Says, on the pull request itself, which OTHER open pull requests change the
+# same files.
+#
+# WHAT THIS IS FOR
+#
+# Several agents working overlapping issues at once is now the normal way work
+# arrives here, and the failure it produces is specific: two pull requests that
+# both branched off the same commit are each green, merge one after the other,
+# and break main together — because neither was ever built against the other.
+# Nothing in a branch ruleset notices. Both ran every required check; the
+# second one's CI had simply never seen the first one's change.
+#
+# It happened twice in one afternoon on 2026-10-06. paullorber #112 and #113
+# both rewrote components/dividends/DividendTable.tsx, and #113 — stacked on
+# #112's branch — was merged 17 seconds after it opened with an empty check
+# rollup; #112's squash swallowed it a minute later, so GitHub still reports
+# #113 as merged while its merge commit is not an ancestor of main. careteam #1
+# and #2 both rewrote eslint.config.mjs, one adding an ignore to it and the
+# other deleting ESLint outright, while #1 was still in flight.
+#
+# "Require branches to be up to date before merging" is the enforcement answer,
+# and the repositories that can afford it have it on. This is the other half,
+# and it is deliberately NOT enforcement: it costs nothing, it works on a
+# repository that has decided the strict policy is too expensive (muk measured
+# that and turned it off — docs/concurrent-branches.md there), and it tells
+# whoever is about to merge something what else is in flight on the same lines.
+#
+# IT NEVER FAILS THE PULL REQUEST
+#
+# Overlap is information, not a verdict. Two pull requests touching one file is
+# routine and usually fine; the point is that somebody knows before the second
+# one lands, not that a robot refuses it. So every error path here still exits
+# 0, and this is not a check worth requiring in a ruleset — a gate that blocks
+# on "somebody else edited this file" would be turned off within a week.
+on:
+  workflow_call:
+    inputs:
+      ignore:
+        description: >-
+          Newline-separated path prefixes that do not count as an overlap, for
+          files nearly every branch rewrites. A lockfile collision is real but
+          it is not the kind a human needs warning about — git resolves it or
+          the install does. Empty by default, so a repository opts in to its own
+          noise list rather than inheriting a guess.
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  overlap:
+    name: What else is in flight on these files
+    # Only the GitHub API, so it answers while a self-hosted pool is busy —
+    # which, on a repository where several branches are open at once, is exactly
+    # when this has something to say.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### What else is in flight on these files
+
+          Lists every other open pull request into the same base branch that changes a file this one also changes, and leaves it as a single comment that is rewritten on each push. Two separately-green pull requests on one file can still break the base branch together, because neither was built against the other; this is how whoever merges second finds out.
+
+          ❌ The overlap comment is missing or stale, so nothing says what else is in flight. It never blocks a merge and never fails the pull request — read the other open pull requests by hand if this is red.
+          TLDR
+
+      - name: Find and report the overlap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          IGNORE: ${{ inputs.ignore }}
+        run: |
+          set -uo pipefail
+
+          # A fork pull request is served a read-only token, so the comment
+          # cannot be written. Say so in the log and stop, rather than failing a
+          # contributor's pull request over a permission it was never given.
+          if [ "$IS_FORK" = "true" ]; then
+            echo "Fork pull request: the token is read-only, so no comment is written."
+            exit 0
+          fi
+
+          mine="$(gh api --paginate "repos/$GH_REPO/pulls/$PR/files" --jq '.[].filename' | sort -u)"
+          if [ -z "$mine" ]; then
+            echo "This pull request changes no files."
+            exit 0
+          fi
+
+          # The ignore list is matched as path PREFIXES, so "supabase/" covers a
+          # directory and "package-lock.json" covers one file.
+          if [ -n "$IGNORE" ]; then
+            while IFS= read -r prefix; do
+              [ -z "$prefix" ] && continue
+              mine="$(printf '%s\n' "$mine" | grep -v "^$prefix" || true)"
+            done <<< "$IGNORE"
+          fi
+          if [ -z "$mine" ]; then
+            echo "Every file this pull request changes is on the ignore list."
+            exit 0
+          fi
+
+          others="$(gh api --paginate \
+            "repos/$GH_REPO/pulls?state=open&base=$BASE&per_page=100" \
+            --jq '.[] | select(.number != (env.PR | tonumber)) | select(.draft == false) | select(.head.repo.full_name == env.GH_REPO) | "\(.number)\t\(.title)"')"
+
+          body_file="$RUNNER_TEMP/overlap.md"
+          : > "$body_file"
+          found=0
+
+          while IFS=$'\t' read -r number title; do
+            [ -z "$number" ] && continue
+            theirs="$(gh api --paginate "repos/$GH_REPO/pulls/$number/files" --jq '.[].filename' | sort -u)"
+            [ -z "$theirs" ] && continue
+            shared="$(comm -12 <(printf '%s\n' "$mine") <(printf '%s\n' "$theirs"))"
+            [ -z "$shared" ] && continue
+            found=$((found + 1))
+            {
+              echo "#### #$number — $title"
+              echo
+              # shellcheck disable=SC2016  # `$` here is sed's end-of-line anchor.
+              printf '%s\n' "$shared" | sed 's/^/- `/; s/$/`/'
+              echo
+            } >> "$body_file"
+          done <<< "$others"
+
+          # One comment, rewritten in place. A new comment per push would bury
+          # the pull request in its own warnings and get muted.
+          # Exported, not interpolated into the expression: `gh api` has no
+          # --arg flag of its own, and gojq reads the environment.
+          export MARKER="<!-- cicd pr-overlap -->"
+          marker="$MARKER"
+          # Streamed per element rather than aggregated: --paginate applies the
+          # expression to each page separately, so a `map(...) | .[0]` would
+          # answer once PER PAGE and a long thread would yield several ids.
+          existing="$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
+            --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)"
+
+          if [ "$found" -eq 0 ]; then
+            echo "No other open pull request into $BASE changes these files." >> "$GITHUB_STEP_SUMMARY"
+            # An overlap that has since merged or closed should not leave a
+            # warning standing. Nothing is posted when there was never one.
+            if [ -n "$existing" ]; then
+              printf '%s\n\n**No longer overlapping.** Every pull request that shared a file with this one has merged or closed.\n' \
+                "$marker" > "$body_file"
+              gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" \
+                -F "body=@$body_file" >/dev/null \
+                || echo "::warning::Could not clear the overlap comment on #$PR."
+            fi
+            exit 0
+          fi
+
+          plural="pull requests"
+          [ "$found" -eq 1 ] && plural="pull request"
+
+          header="$RUNNER_TEMP/overlap-header.md"
+          {
+            echo "$marker"
+            echo
+            echo "### $found other open $plural change files this one changes"
+            echo
+            echo "Each of these can be green on its own and still break \`$BASE\` together with this one, because neither was built against the other. Whichever merges second should be brought up to \`$BASE\` and re-checked before it lands."
+            echo
+            cat "$body_file"
+            echo "<sub>Rewritten on every push by \`pr-overlap.yml\` in paullorb/cicd. Informational — it never blocks a merge.</sub>"
+          } > "$header"
+
+          cat "$header" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" -F "body=@$header" >/dev/null \
+              || echo "::warning::Could not update the overlap comment on #$PR."
+          else
+            gh api -X POST "repos/$GH_REPO/issues/$PR/comments" -F "body=@$header" >/dev/null \
+              || echo "::warning::Could not post the overlap comment on #$PR."
+          fi
+
+          echo "::notice::$found other open $plural change files this one changes."
