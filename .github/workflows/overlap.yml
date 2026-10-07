@@ -7,7 +7,9 @@ name: Overlap on own PRs
 # "main protection" ruleset requires.
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    # `closed` too: the comments on the pull requests this one overlapped are
+    # rewritten without it once it merges.
+    types: [opened, reopened, synchronize, ready_for_review, closed]
 
 permissions:
   contents: read
