@@ -7,6 +7,6 @@
     "check:workflows": "node scripts/check-workflows.mjs"
   },
   "devDependencies": {
-    "js-yaml": "5.2.3"
+    "js-yaml": "5.4.1"
   }
 }
