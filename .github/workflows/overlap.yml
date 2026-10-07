@@ -1,0 +1,30 @@
+name: Overlap on own PRs
+
+# The reusable overlap comment lives in pr-overlap.yml and every other repo
+# calls it from there; this is the call for this repository's own pull
+# requests, so a change to one workflow names the other open PRs touching it.
+# Informational on purpose: it never blocks a merge and is not a check the
+# "main protection" ruleset requires.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # Only the newest push's answer is worth having: an overlap computed against
+  # a head that has been replaced is wrong, not merely old.
+  group: pr-overlap-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  overlap:
+    uses: ./.github/workflows/pr-overlap.yml
+    with:
+      ignore: |
+        package-lock.json
+    permissions:
+      contents: read
+      pull-requests: write
