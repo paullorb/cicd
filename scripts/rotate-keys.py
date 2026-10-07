@@ -18,7 +18,7 @@ TEAM = "team_pf3Bww94XHZFleIsXXb8blP1"
 VAUTH = json.load(open(os.path.expanduser("~/Library/Application Support/com.vercel.cli/auth.json")))["token"]
 SBT = subprocess.check_output(["security", "find-generic-password", "-s", "Supabase CLI", "-w"]).decode().strip()
 STAMP = datetime.date.today().strftime("%Y%m%d")
-MUK = dict(ref="vffbfrwsfcauyambjimv", project="muk-events", dir=os.path.expanduser("~/Documents/GitHub/muk.events"))
+MUK = dict(ref="vffbfrwsfcauyambjimv", project="muk-events", dir=os.path.expanduser("~/Documents/GitHub/muk"))
 PL = dict(ref="assoslkdxmcelmohlxwb", project="paullorber", dir=os.path.expanduser("~/Documents/GitHub/paullorber"))
 
 
