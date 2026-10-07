@@ -27,6 +27,17 @@ name: PR overlap
 # that and turned it off — docs/concurrent-branches.md there), and it tells
 # whoever is about to merge something what else is in flight on the same lines.
 #
+# BOTH SIDES ARE TOLD
+#
+# The comment used to be written on the pull request that triggered the run
+# and nowhere else. A pull request opened second was told about the first;
+# the first learned nothing until somebody pushed to it, and in a repository
+# without the up-to-date rule it could merge second, never rebuilt and never
+# warned, which is the very shape this exists to name. So a run now rewrites
+# the comment on every other open pull request that shares a file with this
+# one, from the current state of all of them, and a caller that also passes
+# the `closed` event has those comments cleared when this one merges.
+#
 # IT NEVER FAILS THE PULL REQUEST
 #
 # Overlap is information, not a verdict. Two pull requests touching one file is
@@ -62,7 +73,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### What else is in flight on these files
 
-          Lists every other open pull request into the same base branch that changes a file this one also changes, and leaves it as a single comment that is rewritten on each push. Two separately-green pull requests on one file can still break the base branch together, because neither was built against the other; this is how whoever merges second finds out.
+          Lists every other open pull request into the same base branch that changes a file this one also changes, as a single comment rewritten whenever any of them opens, pushes or closes, on this pull request and on each one it overlaps. Two separately-green pull requests on one file can still break the base branch together, because neither was built against the other; this is how whoever merges second finds out.
 
           ❌ The overlap comment is missing or stale, so nothing says what else is in flight. It never blocks a merge and never fails the pull request — read the other open pull requests by hand if this is red.
           TLDR
@@ -74,6 +85,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.ref }}
           IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          CLOSED: ${{ github.event.action == 'closed' }}
           IGNORE: ${{ inputs.ignore }}
         run: |
           set -uo pipefail
@@ -86,98 +98,130 @@ jobs:
             exit 0
           fi
 
-          mine="$(gh api --paginate "repos/$GH_REPO/pulls/$PR/files" --jq '.[].filename' | sort -u)"
-          if [ -z "$mine" ]; then
-            echo "This pull request changes no files."
-            exit 0
-          fi
-
-          # The ignore list is matched as path PREFIXES, so "supabase/" covers a
-          # directory and "package-lock.json" covers one file.
-          if [ -n "$IGNORE" ]; then
-            while IFS= read -r prefix; do
-              [ -z "$prefix" ] && continue
-              mine="$(printf '%s\n' "$mine" | grep -v "^$prefix" || true)"
-            done <<< "$IGNORE"
-          fi
-          if [ -z "$mine" ]; then
-            echo "Every file this pull request changes is on the ignore list."
-            exit 0
-          fi
-
-          others="$(gh api --paginate \
-            "repos/$GH_REPO/pulls?state=open&base=$BASE&per_page=100" \
-            --jq '.[] | select(.number != (env.PR | tonumber)) | select(.draft == false) | select(.head.repo.full_name == env.GH_REPO) | "\(.number)\t\(.title)"')"
-
-          body_file="$RUNNER_TEMP/overlap.md"
-          : > "$body_file"
-          found=0
-
-          while IFS=$'\t' read -r number title; do
-            [ -z "$number" ] && continue
-            theirs="$(gh api --paginate "repos/$GH_REPO/pulls/$number/files" --jq '.[].filename' | sort -u)"
-            [ -z "$theirs" ] && continue
-            shared="$(comm -12 <(printf '%s\n' "$mine") <(printf '%s\n' "$theirs"))"
-            [ -z "$shared" ] && continue
-            found=$((found + 1))
-            {
-              echo "#### #$number — $title"
-              echo
-              # shellcheck disable=SC2016  # `$` here is sed's end-of-line anchor.
-              printf '%s\n' "$shared" | sed 's/^/- `/; s/$/`/'
-              echo
-            } >> "$body_file"
-          done <<< "$others"
-
-          # One comment, rewritten in place. A new comment per push would bury
-          # the pull request in its own warnings and get muted.
           # Exported, not interpolated into the expression: `gh api` has no
           # --arg flag of its own, and gojq reads the environment.
           export MARKER="<!-- cicd pr-overlap -->"
-          marker="$MARKER"
-          # Streamed per element rather than aggregated: --paginate applies the
-          # expression to each page separately, so a `map(...) | .[0]` would
-          # answer once PER PAGE and a long thread would yield several ids.
-          existing="$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
-            --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)"
+          files_dir="$RUNNER_TEMP/files"
+          mkdir -p "$files_dir"
 
-          if [ "$found" -eq 0 ]; then
-            echo "No other open pull request into $BASE changes these files." >> "$GITHUB_STEP_SUMMARY"
-            # An overlap that has since merged or closed should not leave a
-            # warning standing. Nothing is posted when there was never one.
-            if [ -n "$existing" ]; then
-              printf '%s\n\n**No longer overlapping.** Every pull request that shared a file with this one has merged or closed.\n' \
-                "$marker" > "$body_file"
-              gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" \
-                -F "body=@$body_file" >/dev/null \
-                || echo "::warning::Could not clear the overlap comment on #$PR."
+          # The files one pull request changes, sorted, less the ignore list,
+          # read once per pull request however many comparisons need it. The
+          # ignore list is matched as path PREFIXES, so "supabase/" covers a
+          # directory and "package-lock.json" covers one file.
+          files_of() {
+            local file="$files_dir/$1"
+            if [ ! -e "$file" ]; then
+              gh api --paginate "repos/$GH_REPO/pulls/$1/files" --jq '.[].filename' | sort -u > "$file" || : > "$file"
+              if [ -n "$IGNORE" ]; then
+                while IFS= read -r prefix; do
+                  [ -z "$prefix" ] && continue
+                  grep -v "^$prefix" "$file" > "$file.tmp" || true
+                  mv "$file.tmp" "$file"
+                done <<< "$IGNORE"
+              fi
             fi
+            cat "$file"
+          }
+
+          # Every open, non-draft pull request of this repository into the
+          # same base: the only ones that can land on it. On a `closed` event
+          # this one is not among them any more, which is the point.
+          open_file="$RUNNER_TEMP/open.tsv"
+          gh api --paginate "repos/$GH_REPO/pulls?state=open&base=$BASE&per_page=100" \
+            --jq '.[] | select(.draft == false) | select(.head.repo.full_name == env.GH_REPO) | "\(.number)\t\(.title)"' > "$open_file" \
+            || : > "$open_file"
+
+          # One comment per pull request, rewritten in place from the current
+          # state of every open one. A new comment per push would bury the
+          # pull request in its own warnings and get muted.
+          report() {
+            local number="$1" body="$RUNNER_TEMP/body-$1.md" header="$RUNNER_TEMP/header-$1.md"
+            local found=0 other title shared mine existing plural
+            : > "$body"
+            mine="$(files_of "$number")"
+            if [ -n "$mine" ]; then
+              while IFS=$'\t' read -r other title; do
+                if [ -z "$other" ] || [ "$other" = "$number" ]; then continue; fi
+                shared="$(comm -12 <(printf '%s\n' "$mine") <(files_of "$other"))"
+                [ -z "$shared" ] && continue
+                found=$((found + 1))
+                {
+                  echo "#### #$other — $title"
+                  echo
+                  # shellcheck disable=SC2016  # `$` here is sed's end-of-line anchor.
+                  printf '%s\n' "$shared" | sed 's/^/- `/; s/$/`/'
+                  echo
+                } >> "$body"
+              done < "$open_file"
+            fi
+
+            # Streamed per element rather than aggregated: --paginate applies the
+            # expression to each page separately, so a `map(...) | .[0]` would
+            # answer once PER PAGE and a long thread would yield several ids.
+            existing="$(gh api --paginate "repos/$GH_REPO/issues/$number/comments" \
+              --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)"
+
+            if [ "$found" -eq 0 ]; then
+              if [ "$number" = "$PR" ]; then
+                echo "No other open pull request into $BASE changes these files." >> "$GITHUB_STEP_SUMMARY"
+              fi
+              # An overlap that has since merged or closed should not leave a
+              # warning standing. Nothing is posted when there was never one.
+              if [ -n "$existing" ]; then
+                printf '%s\n\n**No longer overlapping.** Every pull request that shared a file with this one has merged or closed.\n' \
+                  "$MARKER" > "$body"
+                gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" \
+                  -F "body=@$body" >/dev/null \
+                  || echo "::warning::Could not clear the overlap comment on #$number."
+              fi
+              return 0
+            fi
+
+            plural="pull requests"
+            [ "$found" -eq 1 ] && plural="pull request"
+            {
+              echo "$MARKER"
+              echo
+              echo "### $found other open $plural change files this one changes"
+              echo
+              echo "Each of these can be green on its own and still break \`$BASE\` together with this one, because neither was built against the other. Whichever merges second should be brought up to \`$BASE\` and re-checked before it lands."
+              echo
+              cat "$body"
+              echo "<sub>Rewritten by \`pr-overlap.yml\` in paullorb/cicd whenever a pull request into \`$BASE\` opens, pushes or closes. Informational — it never blocks a merge.</sub>"
+            } > "$header"
+
+            if [ "$number" = "$PR" ]; then
+              cat "$header" >> "$GITHUB_STEP_SUMMARY"
+              echo "::notice::$found other open $plural change files this one changes."
+            fi
+
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" -F "body=@$header" >/dev/null \
+                || echo "::warning::Could not update the overlap comment on #$number."
+            else
+              gh api -X POST "repos/$GH_REPO/issues/$number/comments" -F "body=@$header" >/dev/null \
+                || echo "::warning::Could not post the overlap comment on #$number."
+            fi
+          }
+
+          # This pull request's own comment, unless it has just closed: a
+          # merged pull request needs no warning, and its last comment stands
+          # as the record of what was in flight when it landed.
+          if [ "$CLOSED" != "true" ]; then
+            report "$PR"
+          fi
+
+          # Then every open pull request that shares a file with this one, so
+          # the one opened first is told about the one opened second, and one
+          # that just closed drops out of the others' lists.
+          mine="$(files_of "$PR")"
+          if [ -z "$mine" ]; then
+            echo "This pull request changes no files that count."
             exit 0
           fi
-
-          plural="pull requests"
-          [ "$found" -eq 1 ] && plural="pull request"
-
-          header="$RUNNER_TEMP/overlap-header.md"
-          {
-            echo "$marker"
-            echo
-            echo "### $found other open $plural change files this one changes"
-            echo
-            echo "Each of these can be green on its own and still break \`$BASE\` together with this one, because neither was built against the other. Whichever merges second should be brought up to \`$BASE\` and re-checked before it lands."
-            echo
-            cat "$body_file"
-            echo "<sub>Rewritten on every push by \`pr-overlap.yml\` in paullorb/cicd. Informational — it never blocks a merge.</sub>"
-          } > "$header"
-
-          cat "$header" >> "$GITHUB_STEP_SUMMARY"
-
-          if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" -F "body=@$header" >/dev/null \
-              || echo "::warning::Could not update the overlap comment on #$PR."
-          else
-            gh api -X POST "repos/$GH_REPO/issues/$PR/comments" -F "body=@$header" >/dev/null \
-              || echo "::warning::Could not post the overlap comment on #$PR."
-          fi
-
-          echo "::notice::$found other open $plural change files this one changes."
+          while IFS=$'\t' read -r other _; do
+            if [ -z "$other" ] || [ "$other" = "$PR" ]; then continue; fi
+            shared="$(comm -12 <(printf '%s\n' "$mine") <(files_of "$other"))"
+            [ -z "$shared" ] && continue
+            report "$other"
+          done < "$open_file"
