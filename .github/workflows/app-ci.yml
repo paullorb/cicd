@@ -30,6 +30,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # fetch-depth: 0 so the audit step below can diff the PR's head
+          # against its base. A shallow checkout of the merge commit alone
+          # (the default) has neither SHA in its history to diff.
+          fetch-depth: 0
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -39,8 +44,88 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Gates only the pull requests that could have introduced the
+      # advisory — one that touches package.json or package-lock.json,
+      # which covers every Dependabot PR. Everything else still runs the
+      # audit, but a finding is informational: a ::warning:: annotation plus
+      # a $GITHUB_STEP_SUMMARY entry, not a red run.
+      #
+      # Incident: a bare `npm audit --omit=dev --audit-level=high` caused 11
+      # red runs in 10 days across paullorber (runs 36997482072,
+      # 37407007244) and careteam (37594585014, 37617132582) — every one a
+      # pre-existing transitive high/critical advisory (xmldom, next, sharp,
+      # baseline-browser-mapping) surfacing in a pull request that changed no
+      # dependency at all. A gate a pull request neither caused nor can fix
+      # is noise, and it teaches people to ignore red. The step also used to
+      # report a bare `exit code 1` with no advisory names, so a red run
+      # could not be told apart from one's own change without opening the
+      # log.
+      #
+      # workflow_call reusable workflows inherit the caller's event, so a
+      # pull-request caller still has github.event.pull_request here. A
+      # caller event this cannot read as a pull request (a push to main, for
+      # instance) has no base to diff — and no PR to spare, so it falls back
+      # to gating rather than ever going silent.
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          npm audit --omit=dev --audit-level=high --json > "$RUNNER_TEMP/audit.json"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "No high or critical advisories in production dependencies."
+            exit 0
+          fi
+
+          # shellcheck disable=SC2016  # the ${v.name} below is a JS template literal, not a shell expansion.
+          advisories="$(node -e '
+            const fs = require("fs");
+            let data;
+            try {
+              data = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/audit.json", "utf8"));
+            } catch {
+              console.log("(could not parse npm audit output — see the job log)");
+              process.exit(0);
+            }
+            const names = Object.values(data.vulnerabilities || {})
+              .filter((v) => v.severity === "high" || v.severity === "critical")
+              .map((v) => `${v.name} (${v.severity})`);
+            console.log([...new Set(names)].sort().join(", ") || "(none named — see the job log)");
+          ')"
+
+          # Diff the PR's head against its base when this run can: that is
+          # the only signal for whether THIS change could have introduced
+          # the advisory. Any other trigger has no base to diff, so it stays
+          # gated.
+          gate=true
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            if git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- package.json package-lock.json | grep -q .; then
+              gate=true
+            else
+              gate=false
+            fi
+          fi
+
+          if [ "$gate" = "true" ]; then
+            echo "::error::High/critical advisory in production dependencies: $advisories"
+            exit 1
+          fi
+
+          echo "::warning::Pre-existing high/critical advisory in production dependencies, unrelated to this pull request: $advisories"
+          {
+            echo "### Dependency audit: pre-existing advisory (informational)"
+            echo
+            echo "This pull request did not touch \`package.json\` or \`package-lock.json\`, so the advisory below predates it and cannot be fixed here:"
+            echo
+            echo "- $advisories"
+            echo
+            echo "A pull request that changes dependencies — a Dependabot bump, for instance — still fails hard on this."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Lint
         run: npm run lint
