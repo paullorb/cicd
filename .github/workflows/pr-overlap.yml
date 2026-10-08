@@ -51,6 +51,27 @@ name: PR overlap
 # one lands, not that a robot refuses it. So every error path here still exits
 # 0, and this is not a check worth requiring in a ruleset — a gate that blocks
 # on "somebody else edited this file" would be turned off within a week.
+#
+# WHAT THE CALLER MUST GRANT
+#
+# The comment is written with the caller's GITHUB_TOKEN, and a reusable
+# workflow can only narrow the permissions it inherits, never widen them. The
+# job below declares `pull-requests: write`, so a caller whose job grants less
+# (a read-only repository default, or `contents: read` alone) fails at startup
+# with a permissions error naming this job, instead of running green while
+# every comment write is refused and only warned about. The calling job needs:
+#
+#     permissions:
+#       contents: read
+#       pull-requests: write
+#
+# A `pull_request` run from a fork, or one Dependabot triggered, is served a
+# read-only token whatever the caller asks for. Those runs stop early with a
+# notice and write nothing; the pull request is still named in the comments of
+# the other pull requests whenever one of them runs. This workflow never checks
+# out or executes pull request code, so a caller that wants those runs to
+# write too can trigger it on `pull_request_target` instead, which reads only
+# the API and the base branch's own copy of the calling workflow.
 on:
   workflow_call:
     inputs:
@@ -73,6 +94,10 @@ jobs:
     # when this has something to say.
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Declared, not just inherited: see WHAT THE CALLER MUST GRANT above.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: What this job is for
         run: |
@@ -90,17 +115,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.ref }}
-          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          # The token is read-only on a `pull_request` run from a fork or one
+          # Dependabot triggered; `pull_request_target` gets the base
+          # repository's token in both cases.
+          READ_ONLY: >-
+            ${{ github.event_name == 'pull_request' && (
+              github.event.pull_request.head.repo.full_name != github.repository
+              || github.actor == 'dependabot[bot]') }}
           CLOSED: ${{ github.event.action == 'closed' }}
           IGNORE: ${{ inputs.ignore }}
         run: |
           set -uo pipefail
 
-          # A fork pull request is served a read-only token, so the comment
-          # cannot be written. Say so in the log and stop, rather than failing a
-          # contributor's pull request over a permission it was never given.
-          if [ "$IS_FORK" = "true" ]; then
-            echo "Fork pull request: the token is read-only, so no comment is written."
+          # A fork or Dependabot `pull_request` run is served a read-only
+          # token, so no comment can be written. Say so and stop, rather than
+          # failing the pull request over a permission it was never given.
+          if [ "$READ_ONLY" = "true" ]; then
+            echo "::notice::This run's token is read-only (a fork or Dependabot pull request), so no overlap comment is written. The other open pull requests still name this one when they run."
             exit 0
           fi
 
@@ -112,8 +143,10 @@ jobs:
 
           # The files one pull request changes, sorted, less the ignore list,
           # read once per pull request however many comparisons need it. The
-          # ignore list is matched as path PREFIXES, so "supabase/" covers a
-          # directory and "package-lock.json" covers one file.
+          # ignore list is matched as literal path PREFIXES, so "supabase/"
+          # covers a directory, "package-lock.json" covers one file, and a
+          # prefix like "app/[slug]/" means exactly those characters rather
+          # than a regular expression.
           files_of() {
             local file="$files_dir/$1"
             if [ ! -e "$file" ]; then
@@ -121,7 +154,7 @@ jobs:
               if [ -n "$IGNORE" ]; then
                 while IFS= read -r prefix; do
                   [ -z "$prefix" ] && continue
-                  grep -v "^$prefix" "$file" > "$file.tmp" || true
+                  PREFIX="$prefix" awk 'index($0, ENVIRON["PREFIX"]) != 1' "$file" > "$file.tmp"
                   mv "$file.tmp" "$file"
                 done <<< "$IGNORE"
               fi
@@ -181,11 +214,13 @@ jobs:
               if [ "$number" = "$PR" ]; then
                 echo "No other open pull request into $BASE changes these files." >> "$GITHUB_STEP_SUMMARY"
               fi
-              # An overlap that has since merged or closed should not leave a
-              # warning standing. Nothing is posted when there was never one.
+              # An overlap that has since merged, closed or stopped touching
+              # the shared files should not leave a warning standing. Nothing
+              # is posted when there was never one.
               if [ -n "$existing" ]; then
-                printf '%s\n\n**No longer overlapping.** Every pull request that shared a file with this one has merged or closed.\n' \
-                  "$MARKER" > "$body"
+                # shellcheck disable=SC2016  # the backticks are Markdown, not a command.
+                printf '%s\n\n**No longer overlapping.** No other open pull request into `%s` changes a file this one changes: each one that did has merged, closed, or stopped changing those files.\n' \
+                  "$MARKER" "$BASE" > "$body"
                 gh api -X PATCH "repos/$GH_REPO/issues/comments/$existing" \
                   -F "body=@$body" >/dev/null \
                   || echo "::warning::Could not clear the overlap comment on #$number."
