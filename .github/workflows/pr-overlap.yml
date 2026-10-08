@@ -68,7 +68,8 @@ name: PR overlap
 # A `pull_request` run from a fork, or one Dependabot triggered, is served a
 # read-only token whatever the caller asks for. Those runs stop early with a
 # notice and write nothing; the pull request is still named in the comments of
-# the other pull requests whenever one of them runs. This workflow never checks
+# the other pull requests, and its own comment is rewritten, whenever one of
+# them that shares a file runs. This workflow never checks
 # out or executes pull request code, so a caller that wants those runs to
 # write too can trigger it on `pull_request_target` instead, which reads only
 # the API and the base branch's own copy of the calling workflow.
@@ -162,12 +163,15 @@ jobs:
             cat "$file"
           }
 
-          # Every open, non-draft pull request of this repository into the
-          # same base: the only ones that can land on it. On a `closed` event
-          # this one is not among them any more, which is the point.
+          # Every open, non-draft pull request into the same base, forks
+          # included: the only ones that can land on it. A fork's own run
+          # cannot write (see READ_ONLY above), so it is named here and its
+          # comment is written from the runs of the pull requests it
+          # overlaps. On a `closed` event this one is not among them any more,
+          # which is the point.
           open_file="$RUNNER_TEMP/open.tsv"
           gh api --paginate "repos/$GH_REPO/pulls?state=open&base=$BASE&per_page=100" \
-            --jq '.[] | select(.draft == false) | select(.head.repo.full_name == env.GH_REPO) | "\(.number)\t\(.title)"' > "$open_file" \
+            --jq '.[] | select(.draft == false) | "\(.number)\t\(.title)"' > "$open_file" \
             || : > "$open_file"
 
           # One comment per pull request, rewritten in place from the current
