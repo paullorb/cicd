@@ -100,4 +100,5 @@ functions.
 `scripts/rotate-keys.py` rotates the Supabase secret keys and `MUK_CRON_SECRET`
 across muk.events and paullorber in one pass (Vercel envs, redeploy, webhook
 row, live probe). It lives here because it spans both repos; run it by hand
-with `python3 scripts/rotate-keys.py`. It prints and stores no secrets.
+with `python3 scripts/rotate-keys.py`, then `--prune-paullorber` once the old
+Preview deployments are rebuilt. It prints and stores no secrets.

@@ -5,11 +5,15 @@ version: 2
 # call and means nothing updates them unless something does it on purpose.
 # Nothing did: there was no dependabot.yml here at all.
 #
-# A stale SHA is not a theoretical cost. self-check.yml holds the actionlint
-# download and its checksum, app-vercel.yml and app-native-build.yml hold
-# deploy credentials, and the consumer repos run all of it. An action pinned to
-# a commit from months ago keeps running that commit, including whatever was
-# wrong with it.
+# A stale SHA is not a theoretical cost. app-vercel.yml and
+# app-native-build.yml hold deploy credentials, and the consumer repos run all
+# of it. An action pinned to a commit from months ago keeps running that
+# commit, including whatever was wrong with it.
+#
+# Not covered: the actionlint download in self-check.yml. The github-actions
+# ecosystem only updates `uses: owner/repo@ref` references, so that version and
+# checksum are bumped by hand; self-check.yml warns on every run once a newer
+# actionlint release exists.
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -18,9 +22,10 @@ updates:
       day: monday
     # An action runs on the box with the calling job's own reach, so a freshly
     # published SHA is exactly the thing not to adopt within hours of publish.
+    # default-days only: GitHub Actions does not support the semver-*-days
+    # cooldowns, and Dependabot rejects the whole file if one is set here.
     cooldown:
       default-days: 3
-      semver-major-days: 7
     groups:
       actions:
         patterns:

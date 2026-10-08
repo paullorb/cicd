@@ -63,10 +63,19 @@ jobs:
       # in muk-ci.yml: a linter that runs on every push is not a place to
       # trust a mutable download. It also runs shellcheck over every `run:`
       # block, which matters in a repo that is mostly shell.
+      #
+      # Dependabot does NOT move this pin: its github-actions ecosystem only
+      # updates `uses: owner/repo@ref` references, not a release download
+      # named in an env var. It is bumped by hand, and this step warns on
+      # every run once rhysd/actionlint has a newer release; to bump, set
+      # ACTIONLINT_VERSION to it and ACTIONLINT_SHA256 to the
+      # linux_amd64.tar.gz line of that release's
+      # actionlint_<version>_checksums.txt, in the same pull request.
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
@@ -75,6 +84,16 @@ jobs:
           echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" --version
+
+          # Informational: a newer release is a warning on the run, never a
+          # failure, since nothing else would say the hand-kept pin is stale.
+          if latest="$(gh api repos/rhysd/actionlint/releases/latest --jq '.tag_name' 2>/dev/null)"; then
+            if [ "$latest" != "v$ACTIONLINT_VERSION" ]; then
+              echo "::warning file=.github/workflows/self-check.yml::actionlint $latest is out; self-check.yml pins $ACTIONLINT_VERSION. Bump ACTIONLINT_VERSION and ACTIONLINT_SHA256 together (Dependabot does not track this download)."
+            fi
+          else
+            echo "Could not read rhysd/actionlint's latest release; not checking the pin."
+          fi
 
       - name: Workflows are valid GitHub Actions syntax
         run: |

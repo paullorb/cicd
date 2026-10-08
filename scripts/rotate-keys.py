@@ -9,7 +9,14 @@
 4. Only if muk-events redeployed: write the cron secret into muk_private.system_webhooks.
 5. Probe the release-reminder endpoint with {"events":[]} (rejected before any send):
    400 "No events" == live end to end.
-6. Delete Supabase secret keys from earlier runs of this script (name prefix "rot_").
+6. Delete muk-events' Supabase secret keys from earlier runs of this script
+   (name prefix "rot_"). paullorber's are kept: its existing Preview deployments
+   still carry the previous key, and a Vercel env change only reaches new
+   deployments. Once those previews are rebuilt or gone, run
+       python3 scripts/rotate-keys.py --prune-paullorber
+   which deletes every paullorber "rot_" key except the newest and rotates nothing.
+Any failed write stops the run before the next step, and the script exits non-zero
+unless the webhook rows and the live probe both confirm the new cron secret.
 Nothing secret is printed or written to disk.
 """
 import datetime, json, os, secrets, subprocess, sys, urllib.request, urllib.error
@@ -47,6 +54,11 @@ def vercel_set(project, key, value, target, vtype):
     return ok
 
 
+def fail(msg):
+    print("!! " + msg)
+    sys.exit(1)
+
+
 def sb_new_secret(ref, name):
     st, res = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys?reveal=true", SBT, "POST",
                    {"type": "secret", "name": name, "description": f"Vercel, rotated {STAMP} by rotate-keys.py"})
@@ -54,8 +66,17 @@ def sb_new_secret(ref, name):
     return res.get("api_key")
 
 
-def sb_delete_old_secrets(ref, keep_name):
-    _, keys = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys?reveal=false", SBT)
+def sb_delete_old_secrets(ref, keep_name=None):
+    """Delete this script's earlier keys; with no keep_name, keep the newest "rot_" key."""
+    st, keys = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys?reveal=false", SBT)
+    if st != 200 or not isinstance(keys, list):
+        fail(f"could not list Supabase keys for {ref} ({st})")
+    if keep_name is None:
+        ours = sorted(k["name"] for k in keys if k.get("type") == "secret" and k["name"].startswith("rot_"))
+        if not ours:
+            print("  no rot_ keys to prune"); return
+        keep_name = ours[-1]
+        print(f"  keeping newest key '{keep_name}'")
     for k in keys:
         if k.get("type") == "secret" and k["name"].startswith("rot_") and k["name"] != keep_name:
             st, _ = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys/{k['id']}", SBT, "DELETE")
@@ -74,6 +95,13 @@ def redeploy(p):
     return r.returncode == 0
 
 
+if sys.argv[1:] == ["--prune-paullorber"]:
+    print("== paullorber: delete superseded rot_ keys")
+    sb_delete_old_secrets(PL["ref"])
+    print("== done"); sys.exit(0)
+elif sys.argv[1:]:
+    fail("usage: rotate-keys.py [--prune-paullorber]")
+
 name = f"rot_{STAMP}"
 print("== muk-events SUPABASE_SERVICE_ROLE_KEY")
 k = sb_new_secret(MUK["ref"], name)
@@ -91,25 +119,42 @@ print("== muk-events MUK_CRON_SECRET (Vercel side)")
 new_cron = secrets.token_hex(32)
 cron_ok = vercel_set("muk-events", "MUK_CRON_SECRET", new_cron, "production", "sensitive")
 
-muk_deployed = redeploy(MUK)
+# vercel_set deletes before it creates, so a failed write can leave a variable
+# missing. The running deployments still have the old values (env changes only
+# reach new deployments), so nothing is redeployed unless every write landed.
+if not (muk_srk_ok and pl_srk_ok and cron_ok):
+    fail("A Vercel or Supabase write failed (see above); nothing was redeployed, so production still "
+         "runs on the old values. Fix the failure and re-run this script.")
+
+if not redeploy(MUK):
+    fail("muk-events did not redeploy. Crons keep using the old secret against the old deployment; "
+         "fix the failure and re-run this script.")
 pl_deployed = redeploy(PL)
 
-if cron_ok and muk_deployed:
-    print("== muk_private.system_webhooks")
-    st, res = call(f"https://api.supabase.com/v1/projects/{MUK['ref']}/database/query", SBT, "POST", {
-        "query": f"update muk_private.system_webhooks set secret='{new_cron}', updated_at=now(); "
-                 f"select count(*) as rows_on_new_secret from muk_private.system_webhooks where secret='{new_cron}';"})
-    print("  updated ->", st, json.dumps(res)[:200])
-    print("== probe https://app.muk.events/api/cron/release-reminder")
-    st, body = call("https://app.muk.events/api/cron/release-reminder", new_cron, "POST", {"events": []}, raw=True)
-    print(f"  {st} {body[:120]}  ({'OK: new cron secret is live' if st == 400 else 'NOT OK: expected 400'})")
-else:
-    print("!! Skipped the webhook update: Vercel write or muk-events redeploy failed. Crons keep using the old")
-    print("!! secret against the old deployment. Fix the failure and simply re-run this script.")
-    sys.exit(1)
+print("== muk_private.system_webhooks")
+st, res = call(f"https://api.supabase.com/v1/projects/{MUK['ref']}/database/query", SBT, "POST", {
+    "query": f"update muk_private.system_webhooks set secret='{new_cron}', updated_at=now(); "
+             f"select count(*) filter (where secret='{new_cron}') as on_new, count(*) as total "
+             f"from muk_private.system_webhooks;"})
+row = res[0] if st in (200, 201) and isinstance(res, list) and res else {}
+on_new, total = int(row.get("on_new", -1)), int(row.get("total", -1))
+print(f"  updated -> {st}, {on_new} of {total} rows on the new secret")
+if total <= 0 or on_new != total:
+    fail("The webhook rows were not all moved to the new cron secret, so production dispatches would be "
+         "refused. Re-run this script.")
 
-if muk_srk_ok and muk_deployed:
-    sb_delete_old_secrets(MUK["ref"], name)
-if pl_srk_ok and pl_deployed:
-    sb_delete_old_secrets(PL["ref"], name)
+print("== probe https://app.muk.events/api/cron/release-reminder")
+st, body = call("https://app.muk.events/api/cron/release-reminder", new_cron, "POST", {"events": []}, raw=True)
+print(f"  {st} {body[:120]}")
+if st != 400 or "No events" not in body:
+    fail('Expected 400 "No events" from the release-reminder probe: the new cron secret is not live.')
+print("  OK: new cron secret is live")
+
+sb_delete_old_secrets(MUK["ref"], name)
+if pl_deployed:
+    print("== paullorber: earlier rot_ keys kept for existing Preview deployments; run "
+          "`python3 scripts/rotate-keys.py --prune-paullorber` once they are rebuilt or gone.")
+else:
+    fail("paullorber did not redeploy; production still runs on the previous key, which is kept. "
+         "Redeploy it, then run --prune-paullorber once previews are rebuilt.")
 print("== done")
