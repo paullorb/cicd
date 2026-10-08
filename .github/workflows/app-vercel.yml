@@ -4,6 +4,15 @@ name: App Vercel deploy
 # The caller owns its Vercel project and passes only that repository's IDs and
 # token. Git integration should be disabled in vercel.json so CI is the sole
 # deploy path.
+#
+# PRODUCTION ONLY. There was a `preview` job here, deploying every pull
+# request. No preview was anyone's environment: nothing linked one, nothing
+# tested against one, and the check it posted was required nowhere — while the
+# deploys counted against the one per-day quota every project under the
+# account shares, which paullorber went through on 2026-10-08 (108 of 100,
+# 12 of its previews against 8 production deploys in five hours). A repo that
+# wants a preview of a branch can deploy it by hand; it is not something CI
+# should do on every push.
 
 on:
   workflow_call:
@@ -31,7 +40,7 @@ permissions:
 env:
   VERCEL_CLI_VERSION: 57.0.0
 
-# Both deploys pass --archive=tgz. Every Vercel project under one account
+# The deploy passes --archive=tgz. Every Vercel project under one account
 # shares one per-day upload quota, and the CLI's default is one upload request
 # per file in .vercel/output — muk.events (~1,000 files a build) exhausted it on
 # 2026-08-22 and its production deploy failed. The archive is one upload per
@@ -41,43 +50,6 @@ env:
 # deployment.
 
 jobs:
-  preview:
-    name: Deploy app to Vercel, preview
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
-    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
-    timeout-minutes: 20
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_SCOPE: ${{ inputs.vercel_scope }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version-file: ${{ inputs.node_version_file }}
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build and deploy the tested revision
-        id: deploy
-        shell: bash
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: |
-          npx --yes "vercel@$VERCEL_CLI_VERSION" pull \
-            --yes --environment=preview --scope "$VERCEL_SCOPE" \
-            --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN"
-          npx --yes "vercel@$VERCEL_CLI_VERSION" build \
-            --scope "$VERCEL_SCOPE" --token "$VERCEL_TOKEN"
-          url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
-            --prebuilt --archive=tgz --yes --target=preview --scope "$VERCEL_SCOPE" \
-            --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "### Vercel preview" >> "$GITHUB_STEP_SUMMARY"
-          echo "$url" >> "$GITHUB_STEP_SUMMARY"
-
   production:
     name: Deploy app to Vercel, production
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
