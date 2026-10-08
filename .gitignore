@@ -9,3 +9,4 @@ node_modules/
 .claude/*
 !.claude/settings.json
 !.claude/launch.json
+!.claude/hooks/
