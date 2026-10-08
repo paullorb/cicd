@@ -67,20 +67,26 @@ def sb_new_secret(ref, name):
 
 
 def sb_delete_old_secrets(ref, keep_name=None):
-    """Delete this script's earlier keys; with no keep_name, keep the newest "rot_" key."""
+    """Delete this script's earlier keys; with no keep_name, keep the newest "rot_" key.
+
+    Returns the names of keys whose DELETE did not succeed: each is still a valid key."""
     st, keys = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys?reveal=false", SBT)
     if st != 200 or not isinstance(keys, list):
         fail(f"could not list Supabase keys for {ref} ({st})")
     if keep_name is None:
         ours = sorted(k["name"] for k in keys if k.get("type") == "secret" and k["name"].startswith("rot_"))
         if not ours:
-            print("  no rot_ keys to prune"); return
+            print("  no rot_ keys to prune"); return []
         keep_name = ours[-1]
         print(f"  keeping newest key '{keep_name}'")
+    failed = []
     for k in keys:
         if k.get("type") == "secret" and k["name"].startswith("rot_") and k["name"] != keep_name:
             st, _ = call(f"https://api.supabase.com/v1/projects/{ref}/api-keys/{k['id']}", SBT, "DELETE")
             print(f"  delete old supabase key '{k['name']}' -> {st}")
+            if st not in (200, 204):
+                failed.append(k["name"])
+    return failed
 
 
 def redeploy(p):
@@ -97,7 +103,8 @@ def redeploy(p):
 
 if sys.argv[1:] == ["--prune-paullorber"]:
     print("== paullorber: delete superseded rot_ keys")
-    sb_delete_old_secrets(PL["ref"])
+    if sb_delete_old_secrets(PL["ref"]):
+        fail("Some superseded paullorber keys were not deleted and are still valid (see above). Re-run --prune-paullorber.")
     print("== done"); sys.exit(0)
 elif sys.argv[1:]:
     fail("usage: rotate-keys.py [--prune-paullorber]")
@@ -150,11 +157,14 @@ if st != 400 or "No events" not in body:
     fail('Expected 400 "No events" from the release-reminder probe: the new cron secret is not live.')
 print("  OK: new cron secret is live")
 
-sb_delete_old_secrets(MUK["ref"], name)
+muk_left = sb_delete_old_secrets(MUK["ref"], name)
 if pl_deployed:
     print("== paullorber: earlier rot_ keys kept for existing Preview deployments; run "
           "`python3 scripts/rotate-keys.py --prune-paullorber` once they are rebuilt or gone.")
 else:
     fail("paullorber did not redeploy; production still runs on the previous key, which is kept. "
          "Redeploy it, then run --prune-paullorber once previews are rebuilt.")
+if muk_left:
+    fail("The rotation is live, but these superseded muk-events keys were not deleted and are still valid: "
+         + ", ".join(muk_left) + ". Delete them in the Supabase dashboard.")
 print("== done")
