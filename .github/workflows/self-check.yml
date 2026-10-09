@@ -52,6 +52,9 @@ jobs:
       - name: Install the pinned YAML parser
         run: npm ci --ignore-scripts
 
+      - name: Lint the workflow-check script
+        run: npm run lint
+
       # actionlint validates what a YAML parser cannot: GitHub's own schema
       # and expression syntax. `if: ${{ github.ref == }}` is perfectly valid
       # YAML and passes every structural check below, yet GitHub rejects the
