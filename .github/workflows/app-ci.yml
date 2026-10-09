@@ -43,8 +43,13 @@ jobs:
           # Cache npm's download cache keyed on the caller's lockfile — the
           # default cache-dependency-path finds package-lock.json at the
           # checkout root. `npm ci` still reinstalls every run, but skips
-          # re-downloading each package.
-          cache: npm
+          # re-downloading each package. Enabled only when CI_LABELS is unset
+          # (the default hosted runner): a caller that routes this job to a
+          # persistent runner pool already keeps ~/.npm across jobs, and
+          # GitHub's remote npm cache measured a 1.4 GB archive restored on
+          # every cache-enabled job there (README.md). setup-node treats an
+          # empty `cache` input as disabled.
+          cache: ${{ vars.CI_LABELS == '' && 'npm' || '' }}
 
       - name: Install dependencies
         run: npm ci
