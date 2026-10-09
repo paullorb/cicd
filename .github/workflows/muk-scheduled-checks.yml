@@ -524,9 +524,12 @@ jobs:
           for attempt in 1 2 3 4 5; do
             npm audit --omit=dev --audit-level=high --json \
               --fetch-timeout=90000 --fetch-retries=0 \
-              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err"
-            node "$verdict" "$RUNNER_TEMP/audit.json"
-            case $? in
+              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err" || true
+            # The default step shell is `bash -e`: a nonzero verdict from node
+            # (1 advisory, 2 no report) must reach the case below, not end the step.
+            verdict_rc=0
+            node "$verdict" "$RUNNER_TEMP/audit.json" || verdict_rc=$?
+            case $verdict_rc in
               0) exit 0 ;;
               1) echo "::error::A high or critical advisory affects a production dependency (listed above)."; exit 1 ;;
             esac
@@ -587,7 +590,7 @@ jobs:
       - name: Credentials are present
         id: creds
         run: |
-          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ] || [ -z "${E2E_STAFF_NAME:-}" ] || [ -z "${E2E_STAFF_PASSWORD:-}" ]; then
+          if [ -z "${NEXT_PUBLIC_SUPABASE_URL:-}" ] || [ -z "${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-}" ] || [ -z "${E2E_ADMIN_NAME:-}" ] || [ -z "${E2E_ADMIN_PASSWORD:-}" ] || [ -z "${E2E_STAFF_NAME:-}" ] || [ -z "${E2E_STAFF_PASSWORD:-}" ]; then
             echo "::notice::Lighthouse credentials absent — skipping the nightly baseline."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
