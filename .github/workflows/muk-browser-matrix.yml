@@ -194,7 +194,7 @@ jobs:
         run: lsof -ti :"$E2E_PORT" | xargs kill 2>/dev/null || true
 
       - name: Run e2e tests
-        run: npm run test:e2e -- --project=firefox --project=webkit
+        run: npm run test:e2e -- --project=firefox --project=webkit --workers=1
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}

@@ -386,9 +386,12 @@ jobs:
           for attempt in 1 2 3 4 5; do
             npm audit --omit=dev --audit-level=high --json \
               --fetch-timeout=90000 --fetch-retries=0 \
-              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err"
-            node "$verdict" "$RUNNER_TEMP/audit.json"
-            case $? in
+              >"$RUNNER_TEMP/audit.json" 2>"$RUNNER_TEMP/audit.err" || true
+            # The default step shell is `bash -e`: a nonzero verdict from node
+            # (1 advisory, 2 no report) must reach the case below, not end the step.
+            verdict_rc=0
+            node "$verdict" "$RUNNER_TEMP/audit.json" || verdict_rc=$?
+            case $verdict_rc in
               0) exit 0 ;;
               1) echo "::error::This tree carries a high or critical advisory (listed above). It may predate this PR — check before treating it as a blocker."; exit 1 ;;
             esac
@@ -448,8 +451,9 @@ jobs:
                 echo "\`$missing\` are invisible here. This job would otherwise pass while checking"
                 echo "nothing, so it fails instead."
                 echo
-                echo "**Nothing is wrong with the dependency bump.** The run that decides this pull"
-                echo "request is the next one, started under a normal identity."
+                echo "**This failure is expected and says nothing about the bump itself;** other jobs"
+                echo "report on that. The run that decides this pull request is the next one,"
+                echo "started under a normal identity."
               } >> "$GITHUB_STEP_SUMMARY"
             else
               echo "::error::Missing secret(s):$missing — every check in this job would silently pass while enforcing nothing. A secret has been rotated, renamed or deleted; restore it before merging anything."
@@ -578,8 +582,8 @@ jobs:
                 echo "### This red is the Dependabot handover"
                 echo
                 echo "A run triggered by Dependabot cannot see \`SUPABASE_ACCESS_TOKEN\`, so this"
-                echo "check would skip while reporting green. Nothing is wrong with the dependency"
-                echo "bump; the next run decides this pull request."
+                echo "check would skip while reporting green. This failure is expected and says nothing"
+                echo "about the bump itself; the next run decides this pull request."
               } >> "$GITHUB_STEP_SUMMARY"
             else
               echo "::error::Missing secret SUPABASE_ACCESS_TOKEN — the edge-function sync check would silently skip. It has been rotated, renamed or deleted; restore it."
@@ -832,7 +836,8 @@ jobs:
     # If the runner watchdog ever fails the pool over to ubuntu-latest, it must
     # move THIS variable too, or e2e queues against labels nothing carries.
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_E2E_LABELS || vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
-    timeout-minutes: 25
+    # 25 minutes of work plus the box-load wait below (up to 600 s).
+    timeout-minutes: 35
     # NO concurrency group any more, and that is the point of the lane work.
     #
     # It used to be `muk-e2e-local-stack`, serializing every PR through one
@@ -909,6 +914,9 @@ jobs:
               echo "needed=true" >> "$GITHUB_OUTPUT"
               echo "::warning::The scope query failed; running the suite."
             }
+          # A scope command that succeeds without printing its verdict must not
+          # skip the suite: default to running unless an output was written.
+          grep -q '^needed=' "$GITHUB_OUTPUT" || echo "needed=true" >> "$GITHUB_OUTPUT"
 
       - name: Nothing here reaches the running app
         if: ${{ steps.scope.outputs.needed != 'true' }}
@@ -1001,13 +1009,13 @@ jobs:
       # reads as the branch's fault. Say what the box is carrying, then wait
       # while it is over twice its core count. It never refuses: a job that
       # declines is worse than a slow one, the same rule pre-pr follows
-      # (muk.events #1479). MUK_BOX_LOAD_WAIT=0 skips the wait.
+      # (muk.events #1479). the repository variable MUK_BOX_LOAD_WAIT=0 skips the wait.
       - name: What the box is carrying
         id: box
         shell: bash
         if: ${{ steps.scope.outputs.needed == 'true' }}
         env:
-          MUK_BOX_LOAD_WAIT: "600"
+          MUK_BOX_LOAD_WAIT: ${{ vars.MUK_BOX_LOAD_WAIT || '600' }}
         run: |
           set -uo pipefail
           line="$(node scripts/box-load.mjs --wait 2>&1 | tail -20)" || true
@@ -1335,11 +1343,16 @@ jobs:
           # GitHub API blip (a 504 hit main on 2026-09-02) must not skip the
           # real deploy behind a metrics record — so this retries a few times
           # and, failing that, warns rather than fails.
+          # The deployment is created once; a retry only repeats the status
+          # call, so one release never becomes several deployment records.
           record() {
-            printf '{"ref":"%s","environment":"production-backend","auto_merge":false,"required_contexts":[],"description":"Supabase migrations + edge functions"}' "$GITHUB_SHA" \
-              | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
-              && gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
-                   -f state=success -f description="Deployed by run $GITHUB_RUN_ID"
+            if [ ! -s "$RUNNER_TEMP/deployment-id" ]; then
+              printf '{"ref":"%s","environment":"production-backend","auto_merge":false,"required_contexts":[],"description":"Supabase migrations + edge functions"}' "$GITHUB_SHA" \
+                | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
+                || { rm -f "$RUNNER_TEMP/deployment-id"; return 1; }
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+                 -f state=success -f description="Deployed by run $GITHUB_RUN_ID"
           }
           for attempt in 1 2 3; do
             record && exit 0
@@ -1456,7 +1469,11 @@ jobs:
       # server-side and the result is the same prebuilt deployment; the
       # verify step below still has to see this commit served before anything
       # is recorded.
-      - name: Build and deploy production
+      # The token reaches only the pull and deploy steps, through the
+      # environment (the CLI reads VERCEL_TOKEN itself, so it is not in any
+      # process's arguments). `vercel build` runs this checkout's install and
+      # build scripts and gets no token.
+      - name: Pull Vercel project settings
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
@@ -1470,6 +1487,7 @@ jobs:
           # re-run does anyway, and the verify step below is what decides
           # whether the deploy counted, so a duplicate attempt cannot record a
           # build the domain does not serve.
+          cat > "$RUNNER_TEMP/retry.sh" <<'RETRY'
           retry() {
             local what="$1"; shift
             local attempt=1
@@ -1483,9 +1501,37 @@ jobs:
               attempt=$((attempt + 1))
             done
           }
-          retry "vercel pull" npx --yes vercel@58.4.4 pull --yes --environment=production --token "$VERCEL_TOKEN"
-          retry "vercel build" npx --yes vercel@58.4.4 build --prod --token "$VERCEL_TOKEN"
-          retry "vercel deploy" npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --prod --yes --token "$VERCEL_TOKEN"
+          RETRY
+          . "$RUNNER_TEMP/retry.sh"
+          retry "vercel pull" npx --yes vercel@58.4.4 pull --yes --environment=production
+
+      - name: Build production
+        run: |
+          . "$RUNNER_TEMP/retry.sh"
+          retry "vercel build" npx --yes vercel@58.4.4 build --prod
+
+      - name: Deploy production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          # The build step above runs this checkout's own scripts, which can
+          # write to RUNNER_TEMP; this step holds the token, so it recreates
+          # the helper here instead of sourcing a file the build could have
+          # replaced.
+          retry() {
+            local what="$1"; shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::$what failed three times. A network-level failure here is Vercel's API rather than this commit; re-run the job."
+                return 1
+              fi
+              echo "::warning::$what failed (attempt $attempt of 3), retrying in $((attempt * 15))s."
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+          retry "vercel deploy" npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --prod --yes
 
       # The CLI returning is not the same thing as the site serving this build:
       # an alias/custom-domain slip or a stale edge would be recorded below as
@@ -1522,11 +1568,16 @@ jobs:
           # must not skip the real smoke check behind a metrics record — so
           # this retries a few times and, failing that, warns rather than
           # fails.
+          # The deployment is created once; a retry only repeats the status
+          # call, so one release never becomes several deployment records.
           record() {
-            printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"Next.js app on Vercel"}' "$GITHUB_SHA" \
-              | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
-              && gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
-                   -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
+            if [ ! -s "$RUNNER_TEMP/deployment-id" ]; then
+              printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"Next.js app on Vercel"}' "$GITHUB_SHA" \
+                | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' > "$RUNNER_TEMP/deployment-id" \
+                || { rm -f "$RUNNER_TEMP/deployment-id"; return 1; }
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$(cat "$RUNNER_TEMP/deployment-id")/statuses" \
+                 -f state=success -f environment_url="https://muk.events" -f description="Deployed by run $GITHUB_RUN_ID"
           }
           for attempt in 1 2 3; do
             record && exit 0
@@ -1590,8 +1641,10 @@ jobs:
           E2E_ADMIN_EMAIL: ${{ secrets.E2E_ADMIN_EMAIL }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           missing=""
+          [ -n "$SUPABASE_SERVICE_ROLE_KEY" ] || missing="$missing SUPABASE_SERVICE_ROLE_KEY"
           [ -n "$E2E_ADMIN_NAME" ] || missing="$missing E2E_ADMIN_NAME"
           [ -n "$E2E_ADMIN_PASSWORD" ] || missing="$missing E2E_ADMIN_PASSWORD"
           [ -n "$E2E_ADMIN_EMAIL" ] || missing="$missing E2E_ADMIN_EMAIL"
