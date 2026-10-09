@@ -40,6 +40,11 @@ jobs:
         with:
           # The app repo owns its Node version.
           node-version-file: ${{ inputs.node_version_file }}
+          # Cache npm's download cache keyed on the caller's lockfile — the
+          # default cache-dependency-path finds package-lock.json at the
+          # checkout root. `npm ci` still reinstalls every run, but skips
+          # re-downloading each package.
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
