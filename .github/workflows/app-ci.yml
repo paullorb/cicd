@@ -43,13 +43,20 @@ jobs:
           # Cache npm's download cache keyed on the caller's lockfile — the
           # default cache-dependency-path finds package-lock.json at the
           # checkout root. `npm ci` still reinstalls every run, but skips
-          # re-downloading each package. Enabled only when CI_LABELS is unset
-          # (the default hosted runner): a caller that routes this job to a
-          # persistent runner pool already keeps ~/.npm across jobs, and
-          # GitHub's remote npm cache measured a 1.4 GB archive restored on
-          # every cache-enabled job there (README.md). setup-node treats an
-          # empty `cache` input as disabled.
-          cache: ${{ vars.CI_LABELS == '' && 'npm' || '' }}
+          # re-downloading each package. Enabled only on a GitHub-hosted
+          # runner: a persistent runner pool already keeps ~/.npm across
+          # jobs, and GitHub's remote npm cache measured a 1.4 GB archive
+          # restored on every cache-enabled job there (README.md).
+          # setup-node treats an empty `cache` input as disabled.
+          #
+          # Gated on runner.environment, not vars.CI_LABELS: a caller can set
+          # CI_LABELS to an explicit hosted label (e.g. ["ubuntu-latest"])
+          # rather than leaving it unset, which still lands on a fresh hosted
+          # VM but would read as "persistent" under a CI_LABELS-emptiness
+          # check, silently losing the cache (chatgpt-codex-connector review
+          # on #86, thread PRRT_kwDOTaxRnc6qqygQ). runner.environment reads
+          # the actual runner type regardless of how CI_LABELS is set.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
       # Restores Next.js's own build cache (.next/cache: webpack/SWC
       # artifacts), keyed on the lockfile plus every source file's content so
@@ -58,10 +65,11 @@ jobs:
       # .next/cache before the exact-match case exists. This only helps the
       # SECOND build against a given lockfile; a cache miss builds exactly as
       # slow as before. Placed before `npm ci` so the hashFiles globs below
-      # never pick up node_modules. Gated like the npm cache above: a
-      # persistent runner pool already keeps .next/cache on disk across jobs.
+      # never pick up node_modules. Gated like the npm cache above, on the
+      # runner's actual type: a persistent runner pool already keeps
+      # .next/cache on disk across jobs.
       - name: Cache Next.js build
-        if: ${{ vars.CI_LABELS == '' }}
+        if: ${{ runner.environment == 'github-hosted' }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .next/cache
