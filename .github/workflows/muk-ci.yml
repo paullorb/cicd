@@ -1514,7 +1514,23 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          . "$RUNNER_TEMP/retry.sh"
+          # The build step above runs this checkout's own scripts, which can
+          # write to RUNNER_TEMP; this step holds the token, so it recreates
+          # the helper here instead of sourcing a file the build could have
+          # replaced.
+          retry() {
+            local what="$1"; shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::$what failed three times. A network-level failure here is Vercel's API rather than this commit; re-run the job."
+                return 1
+              fi
+              echo "::warning::$what failed (attempt $attempt of 3), retrying in $((attempt * 15))s."
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
           retry "vercel deploy" npx --yes vercel@58.4.4 deploy --prebuilt --archive=tgz --prod --yes
 
       # The CLI returning is not the same thing as the site serving this build:
