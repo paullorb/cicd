@@ -2,14 +2,16 @@
   "name": "cicd-workflow-checks",
   "version": "0.0.0",
   "private": true,
-  "description": "Dependencies for scripts/check-workflows.mjs only. This repo ships workflows, not an application.",
+  "description": "Dev tooling for scripts/check-workflows.mjs only: its YAML parser and oxlint. This repo ships workflows, not an application.",
   "engines": {
     "node": "24.x"
   },
   "scripts": {
-    "check:workflows": "node scripts/check-workflows.mjs"
+    "check:workflows": "node scripts/check-workflows.mjs",
+    "lint": "oxlint --deny-warnings --report-unused-disable-directives"
   },
   "devDependencies": {
-    "js-yaml": "5.4.1"
+    "js-yaml": "5.4.1",
+    "oxlint": "^1.87.0"
   }
 }
