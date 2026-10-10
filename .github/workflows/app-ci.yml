@@ -184,15 +184,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Start local PostgreSQL
-        # The ubuntu runner image ships a stopped PostgreSQL server. This step
-        # assumes a Linux runner; if a caller ever routes CI_LABELS to the Mac
-        # Studio, borrow the dual-OS setup step from muk-ci.yml.
-        run: |
-          sudo systemctl start postgresql
-          sudo -u postgres createuser --superuser "$(whoami)" || true
-          echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
-
       - name: Replay migrations onto a scratch database
         shell: bash
         run: |
