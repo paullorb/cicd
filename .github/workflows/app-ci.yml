@@ -27,7 +27,22 @@ jobs:
   quality:
     name: Lint, audit & build
     runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
-    timeout-minutes: 15
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      SCRATCH_DB: ci_${{ github.repository_id }}_${{ github.run_id }}_${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -168,19 +183,6 @@ jobs:
 
       - name: Build
         run: npm run build
-
-  # Proves every migration applies cleanly to an empty database, in filename
-  # order, before it ever reaches the shared production project. Scratch
-  # databases are named by run id, so concurrent runs — including runs from
-  # other repos served by this pipeline — never collide.
-  migrations:
-    name: Migrations replay (scratch Postgres)
-    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
-    timeout-minutes: 10
-    env:
-      SCRATCH_DB: ci_${{ github.repository_id }}_${{ github.run_id }}_${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Start local PostgreSQL
         # The ubuntu runner image ships a stopped PostgreSQL server. This step
