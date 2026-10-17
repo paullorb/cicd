@@ -86,14 +86,21 @@ on:
         required: false
         type: string
         default: ""
+      runs_on:
+        description: >-
+          JSON runner labels for the job. Hosted by default; a repository with
+          its own pool passes its labels, because hosted minutes are
+          account-wide and this runs on every push to every pull request.
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
 
 jobs:
   overlap:
     name: What else is in flight on these files
-    # Only the GitHub API, so it answers while a self-hosted pool is busy —
-    # which, on a repository where several branches are open at once, is exactly
-    # when this has something to say.
-    runs-on: ubuntu-latest
+    # Only the GitHub API. Hosted by default so it answers while a self-hosted
+    # pool is busy; a caller that is short of hosted minutes passes `runs_on`.
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 5
     # Declared, not just inherited: see WHAT THE CALLER MUST GRANT above.
     permissions:
