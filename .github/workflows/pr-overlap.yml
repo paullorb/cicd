@@ -88,18 +88,23 @@ on:
         default: ""
       runs_on:
         description: >-
-          JSON runner labels for the job. Hosted by default; a repository with
-          its own pool passes its labels, because hosted minutes are
-          account-wide and this runs on every push to every pull request.
+          JSON runner labels for the job. The caller's own self-hosted pool by
+          default (the `app-ci` label every paullorb repo registers on the Mac
+          Studio); a repository with a differently named pool passes its
+          labels. Hosted minutes are account-wide, this runs on every push to
+          every pull request, and the account hit 90% of its monthly cap on
+          2026-10-19 — so hosted is something a caller asks for, never the
+          default.
         required: false
         type: string
-        default: '"ubuntu-latest"'
+        default: '["self-hosted","app-ci"]'
 
 jobs:
   overlap:
     name: What else is in flight on these files
-    # Only the GitHub API. Hosted by default so it answers while a self-hosted
-    # pool is busy; a caller that is short of hosted minutes passes `runs_on`.
+    # Only the GitHub API, so any runner will do; the caller's pool by default
+    # (see `runs_on` above). It queues behind a busy pool, which is fine for a
+    # comment that never gates anything.
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 5
     # `runs_on` lets a caller name a Windows label, and GitHub then runs an

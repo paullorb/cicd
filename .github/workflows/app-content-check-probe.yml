@@ -28,7 +28,7 @@ jobs:
   comment:
     name: Confirm path-scoped secret-bearing PR job
     if: github.event_name == 'pull_request' && github.repository == inputs.expected_repository
-    runs-on: ubuntu-slim
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 5
     steps:
       - name: Verify repository-scoped secret is available
