@@ -28,7 +28,7 @@ jobs:
     name: Workflows parse and follow the house rules
     # Routed like every other job (app-ci.yml explains the default). The
     # account's hosted minutes are the reason this moved off ubuntu-latest.
-    runs-on: ${{ (github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
+    runs-on: ${{ (github.actor == 'dependabot[bot]' || github.event.pull_request.user.login == 'dependabot[bot]' || startsWith(github.head_ref, 'dependabot/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 5
     steps:
       - name: What this job is for
