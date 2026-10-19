@@ -42,15 +42,28 @@ can be flipped without a commit:
   the three repository-level runners on the Mac Studio.
   `muk-runner-watchdog.yml` flips the variable to `["ubuntu-latest"]` when no
   runner is online, and back.
-- **Every other repo** uses `CI_LABELS`, defaulting to `["ubuntu-latest"]`.
-  Repository-level runners on a personal account serve exactly one
-  repository, so the muk-ci pool is not reachable from other repos — and
-  their volume is fine on hosted minutes.
+- **Every other repo** uses `CI_LABELS`, defaulting to
+  `["self-hosted","app-ci"]`. Repository-level runners on a personal account
+  serve exactly one repository, so the muk-ci pool is not reachable from other
+  repos; instead each caller registers its own `app-ci` runner(s) on the same
+  Mac Studio (`~/actions-runner-<repo>`, one LaunchAgent each — see "Adding a
+  repository"). Hosted minutes reached 90% of the account's monthly cap on
+  2026-10-19, so GitHub-hosted is now the manual escape hatch, not the
+  default: set `CI_LABELS` to `["ubuntu-latest"]` in the repo's variables
+  while the box is down, and clear it after. There is no watchdog for these
+  pools (one would cost hosted minutes on every tick); the muk heartbeat
+  alerts when the box itself is down.
+- **Dependabot's pull requests** run on `ubuntu-latest` whatever the
+  variable says, in every routed job: a bumped package's install script or
+  tests on a persistent box is the one blast radius a disposable VM is worth.
+  That is the only hosted use left by design.
 
-Concurrent PRs from several repos are safe by construction: hosted jobs get
-fresh VMs, muk jobs queue on the 3-slot pool, migration-replay scratch
-databases are named by run id, and repo-scoped concurrency groups (e.g. muk's
-`e2e-prod`) never cross repositories.
+Concurrent PRs from several repos are safe by construction: each repo's
+runner(s) serve only that repo, migration-replay scratch databases are named
+by repository and run id on the shared Homebrew PostgreSQL, and repo-scoped
+concurrency groups (e.g. muk's `e2e-prod`) never cross repositories. The
+fixed ports below are box-wide, though: a repo that starts a server in CI
+picks a port no other repo's job uses (careteam's e2e uses `3300`).
 
 Fixed ports on the Mac Studio:
 
@@ -70,6 +83,22 @@ archive in every cache-enabled job.
 
 ## Adding a repository
 
+0. Register an `app-ci` runner for the repo on the Mac Studio (a runner
+   serves one repository, so this is per repo; the tarball version is the one
+   the muk instances run):
+
+   ```sh
+   repo=<name>
+   mkdir ~/actions-runner-$repo && cd ~/actions-runner-$repo
+   tar xzf ~/Downloads/actions-runner-osx-arm64-<version>.tar.gz
+   ./config.sh --url https://github.com/paullorb/$repo \
+     --token "$(gh api -X POST repos/paullorb/$repo/actions/runners/registration-token --jq .token)" \
+     --name "tostinn-mac-$repo" --labels app-ci --unattended
+   ./svc.sh install && ./svc.sh start
+   ```
+
+   A second instance (`~/actions-runner-$repo-2`, name suffixed `-2`) is
+   only worth it for a repo whose PRs run several jobs at once.
 1. Point a small caller workflow in the app repo at `app-ci.yml@<SHA>`.
 2. Pass the caller's Node version file when it is not `.node-version`.
 3. Compose `app-vercel.yml` for isolated Vercel delivery and

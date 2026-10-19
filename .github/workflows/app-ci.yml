@@ -19,29 +19,25 @@ permissions:
   contents: read
 
 # Runner routing mirrors the muk workflows: the caller repository's CI_LABELS
-# variable picks the pool, defaulting to GitHub-hosted. Repo-level runners on
-# a personal account serve exactly one repository, so the muk-ci pool is not
-# reachable from other repos; hosted minutes are fine at these repos' volume.
+# variable picks the pool, defaulting to the self-hosted `app-ci` label. Repo-
+# level runners on a personal account serve exactly one repository, so every
+# caller registers its own `app-ci` runner on the Mac Studio (README, "Runner
+# model"). Hosted minutes hit 90% of the account's monthly cap on 2026-10-19,
+# so GitHub-hosted is the manual escape hatch now — set CI_LABELS to
+# ["ubuntu-latest"] in the caller's repo variables — not the default.
+#
+# Dependabot's pull requests are the exception, same as muk-ci.yml: a bumped
+# package's install script or tests run on a persistent box, so those PRs go
+# to a disposable hosted VM. So does a pull request from a fork, whose code
+# nobody here wrote (GitHub's own warning for self-hosted runners on private
+# repos). Those are the only hosted uses left by design.
 
 jobs:
   quality:
     name: Lint, audit & build
-    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
+    runs-on: ${{ (github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 5s
-          --health-timeout 5s --health-retries 10
     env:
-      PGHOST: localhost
-      PGPORT: "5432"
-      PGUSER: postgres
       SCRATCH_DB: ci_${{ github.repository_id }}_${{ github.run_id }}_${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -83,6 +79,19 @@ jobs:
       # never pick up node_modules. Gated like the npm cache above, on the
       # runner's actual type: a persistent runner pool already keeps
       # .next/cache on disk across jobs.
+      # On the persistent runner the checkout's `git clean -ffdx` wipes the
+      # ignored .next/cache every run, so the webpack/SWC cache lives outside
+      # the checkout and .next/cache is a symlink to it (one per repo and
+      # runner; a job never shares a runner, so no two jobs write it at once).
+      - name: Keep the Next.js build cache across runs
+        if: ${{ runner.environment != 'github-hosted' }}
+        shell: bash
+        run: |
+          keep="$HOME/.cache/app-ci/${GITHUB_REPOSITORY##*/}/next-cache"
+          mkdir -p "$keep" .next
+          rm -rf .next/cache
+          ln -s "$keep" .next/cache
+
       - name: Cache Next.js build
         if: ${{ runner.environment == 'github-hosted' }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -183,6 +192,34 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # A Docker service container needs a Linux runner; the Mac Studio has
+      # none. Use the PostgreSQL that is already there instead — Homebrew's
+      # postgresql@17 on the box, the image's stopped server on hosted — the
+      # same way muk-ci.yml's migrations job does.
+      - name: Ensure a local PostgreSQL
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(supabase/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Supabase migrations yet — no database needed."
+            exit 0
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo systemctl start postgresql
+            sudo -u postgres createuser --superuser "$(whoami)" || true
+            echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
+          else
+            # Started at login by Homebrew's LaunchAgent; a brew upgrade can
+            # leave it stopped, and a missing server fails here, not at the
+            # first psql with a connection error nobody can place.
+            export PATH="/opt/homebrew/bin:$PATH"
+            pg_isready -h /tmp -q || brew services start postgresql@17
+            for _ in $(seq 1 20); do pg_isready -h /tmp -q && break; sleep 1; done
+            pg_isready -h /tmp || { echo "::error::No PostgreSQL on this runner (brew services start postgresql@17)."; exit 1; }
+            echo "PGHOST=/tmp" >> "$GITHUB_ENV"
+          fi
 
       - name: Replay migrations onto a scratch database
         shell: bash

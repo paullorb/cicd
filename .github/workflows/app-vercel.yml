@@ -53,7 +53,7 @@ jobs:
   production:
     name: Deploy app to Vercel, production
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(vars.CI_LABELS || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 20
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
