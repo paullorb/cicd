@@ -102,6 +102,13 @@ jobs:
     # pool is busy; a caller that is short of hosted minutes passes `runs_on`.
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 5
+    # `runs_on` lets a caller name a Windows label, and GitHub then runs an
+    # unspecified `run` step with pwsh. Every step below is Bash: heredocs,
+    # `local`, process substitution. Pin the shell so the runner choice stays
+    # as generic as it is advertised to be.
+    defaults:
+      run:
+        shell: bash
     # Declared, not just inherited: see WHAT THE CALLER MUST GRANT above.
     permissions:
       contents: read
