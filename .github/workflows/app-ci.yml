@@ -35,7 +35,7 @@ permissions:
 jobs:
   quality:
     name: Lint, audit & build
-    runs-on: ${{ (github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
+    runs-on: ${{ (github.actor == 'dependabot[bot]' || github.event.pull_request.user.login == 'dependabot[bot]' || startsWith(github.head_ref, 'dependabot/') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 30
     env:
       SCRATCH_DB: ci_${{ github.repository_id }}_${{ github.run_id }}_${{ github.run_attempt }}
@@ -207,9 +207,14 @@ jobs:
             exit 0
           fi
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo systemctl start postgresql
-            sudo -u postgres createuser --superuser "$(whoami)" || true
-            echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
+            # Hosted VM: the image's own PostgreSQL trails prod's 17 (16 on
+            # ubuntu-24.04), so run the same postgres:17 image the former
+            # service container used, with the same trust auth.
+            docker run -d --name ci-postgres -p 5432:5432 \
+              -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17 >/dev/null
+            for _ in $(seq 1 30); do pg_isready -h localhost -U postgres -q && break; sleep 1; done
+            pg_isready -h localhost -U postgres || { echo "::error::postgres:17 did not come up."; exit 1; }
+            { echo "PGHOST=localhost"; echo "PGUSER=postgres"; } >> "$GITHUB_ENV"
           else
             # Started at login by Homebrew's LaunchAgent; a brew upgrade can
             # leave it stopped, and a missing server fails here, not at the
