@@ -88,8 +88,18 @@ jobs:
         env:
           VERCEL_REQUIRED_PUBLIC_URL_ENV: ${{ inputs.required_public_url_env }}
         run: |
-          node --env-file=.vercel/.env.production.local <<'NODE'
+          node <<'NODE'
+          const { readFileSync } = require('node:fs');
           const { spawnSync } = require('node:child_process');
+          const { parseEnv } = require('node:util');
+
+          // A runner may define an application variable as an empty string.
+          // Node's --env-file preserves existing variables, including empty
+          // ones, so explicitly apply Vercel's pulled production values.
+          Object.assign(
+            process.env,
+            parseEnv(readFileSync('.vercel/.env.production.local', 'utf8')),
+          );
 
           const key = process.env.VERCEL_REQUIRED_PUBLIC_URL_ENV;
           if (key) {
