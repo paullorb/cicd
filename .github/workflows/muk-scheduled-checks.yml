@@ -617,9 +617,19 @@ jobs:
         if: steps.creds.outputs.ok == 'true'
         run: npm run build
 
+      # Install the Chromium build this lockfile's Playwright expects, so the
+      # fallback below never depends on which job last ran on the box: after a
+      # Playwright bump the cache lacked it and the nightly measured nothing.
+      # The cache GC hangs from a launchd runner (muk docs/self-hosted-runners.md).
+      - name: Install Playwright Chromium
+        if: steps.creds.outputs.ok == 'true'
+        run: npx playwright install chromium
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+
       # puppeteer-core (from Lighthouse's tree) ships without a browser; point it
-      # at the runner's installed Chrome, or at the Chromium Playwright already
-      # keeps on the box for the e2e suite. An app somebody installed by hand
+      # at the runner's installed Chrome, or at the Chromium Playwright
+      # installed in the step above. An app somebody installed by hand
       # can also be removed by hand: on 2026-10-04 Chrome was gone from the
       # runner and the nightly failed here before measuring anything.
       - name: Locate Chrome
