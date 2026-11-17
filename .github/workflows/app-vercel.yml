@@ -81,7 +81,7 @@ jobs:
         run: |
           npx --yes "vercel@$VERCEL_CLI_VERSION" pull \
             --yes --environment=production --scope "$VERCEL_SCOPE" \
-            --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN"
+            --project "$VERCEL_PROJECT_ID"
 
       - name: Build locally with production environment
         shell: bash
@@ -139,7 +139,7 @@ jobs:
         run: |
           url=$(npx --yes "vercel@$VERCEL_CLI_VERSION" deploy \
             --prebuilt --archive=tgz --prod --yes --scope "$VERCEL_SCOPE" \
-            --project "$VERCEL_PROJECT_ID" --token "$VERCEL_TOKEN")
+            --project "$VERCEL_PROJECT_ID")
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "### Vercel production" >> "$GITHUB_STEP_SUMMARY"
           echo "$url" >> "$GITHUB_STEP_SUMMARY"
