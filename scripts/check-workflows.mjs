@@ -12,7 +12,9 @@ import { join } from "node:path";
 //   1. Every workflow file parses as YAML and declares `on` and `jobs`.
 //   2. Every job that is not a pure `uses:` caller declares runs-on, steps and
 //      an explicit timeout — an untimed job on the self-hosted pool holds one
-//      of the machine's few slots for six hours.
+//      of the machine's few slots for six hours — and that timeout stays at or
+//      under MAX_TIMEOUT_MINUTES, or muk.events' stuck-run reaper cancels the
+//      job while it is still healthy.
 //   3. Every such job writes a "What this job is for" block to the run
 //      summary. The owner reads run summaries, not YAML comments, and a job
 //      that cannot say why it exists and what its red means is a check nobody
@@ -44,6 +46,16 @@ import { join } from "node:path";
 const WORKFLOW_DIR = ".github/workflows";
 const SUMMARY_EXEMPT = /^app-/;
 
+// muk.events' stuck-run reaper (.github/workflows/stuck-run-reaper.yml there)
+// cancels any run with a job in progress for longer than its THRESHOLD_MINUTES.
+// It cannot read this repo, so the coupling is held from both ends: muk's
+// tests/unit/workflow-syntax.test.ts pins its threshold at or above
+// MAX_TIMEOUT_MINUTES + 15, and this check keeps every job here at or under
+// MAX_TIMEOUT_MINUTES. The longest job today is the Lighthouse nightly (45);
+// muk's own longest is its golden-flows nightly (60). Raise all three together.
+export const MAX_TIMEOUT_MINUTES = 60;
+export const REAPER_THRESHOLD_MINUTES = 75;
+
 export function jobProblems(file, name, job, { requireSummary }) {
   const problems = [];
   if (job.uses) return problems; // a caller job delegates everything
@@ -56,6 +68,10 @@ export function jobProblems(file, name, job, { requireSummary }) {
   if (job["timeout-minutes"] === undefined) {
     problems.push(
       `${file}: job "${name}" has no timeout-minutes — a hung job holds a self-hosted slot for six hours`,
+    );
+  } else if (!(Number(job["timeout-minutes"]) <= MAX_TIMEOUT_MINUTES)) {
+    problems.push(
+      `${file}: job "${name}" has timeout-minutes ${job["timeout-minutes"]}, above ${MAX_TIMEOUT_MINUTES} — muk.events' stuck-run reaper cancels any job running past ${REAPER_THRESHOLD_MINUTES} minutes, so this job could be killed while healthy. Raise THRESHOLD_MINUTES in muk.events/.github/workflows/stuck-run-reaper.yml and both constants here in the same change.`,
     );
   }
   if (

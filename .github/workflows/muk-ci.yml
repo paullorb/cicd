@@ -1247,6 +1247,17 @@ jobs:
     # under one user. Revisit when hardening (docs/self-hosted-runners.md).
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
+    # Staging for main-only deploy secrets (muk.events M13). Today the
+    # environment has no secrets, no protection rules and no branch policy,
+    # so this changes nothing: with no environment secret of the same name, the
+    # job reads the secret the caller passes, as before. Once the owner restricts
+    # the environment to `main` and copies the deploy secrets into it, the
+    # environment's copy takes precedence here and the repo-level copy can go.
+    # `deployment: false` keeps GitHub from creating a second Deployment record
+    # beside the one this job writes for DORA below.
+    environment:
+      name: production-backend
+      deployment: false
     permissions:
       contents: read
       # For the DORA deployment record below.
@@ -1403,6 +1414,12 @@ jobs:
       vars.VERCEL_DEPLOY_ENABLED == 'true'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
+    # Staged like deploy-backend's (see there). The "production" Deployment
+    # record below names the same environment; GitHub matches names
+    # case-insensitively.
+    environment:
+      name: Production
+      deployment: false
     permissions:
       contents: read
       # For the DORA deployment record below.
@@ -1617,6 +1634,10 @@ jobs:
       vars.VERCEL_DEPLOY_ENABLED == 'true'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 20
+    # Staged like deploy-backend's (see there).
+    environment:
+      name: Production
+      deployment: false
     env:
       # Not :3100 and not :3000 — nothing is served here. The suite talks to
       # the public domain, and playwright.config.ts starts no webServer when

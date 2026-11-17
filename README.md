@@ -122,7 +122,15 @@ archive in every cache-enabled job.
 
 Deploy jobs remain ordered inside `muk-ci.yml`: quality, rules, migration
 replay, and Playwright must pass before migrations deploy, followed by edge
-functions.
+functions. The three main-only deploy jobs name a caller environment
+(`production-backend`, `Production`) with `deployment: false`, so deploy-only
+secrets can move from the caller's repository store into an environment
+restricted to `main`; until they do, the job reads the secret the caller
+passes, as before.
+
+Every job's `timeout-minutes` stays at or under 60
+(`scripts/check-workflows.mjs`): muk.events' stuck-run reaper cancels any job
+running past 75 minutes, and pins that threshold from its side.
 
 ## Operator scripts
 
