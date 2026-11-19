@@ -265,6 +265,14 @@ jobs:
     name: Quota & budget
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
+    # The Vercel token and team id are read from the caller's main-only
+    # `Production` environment, so the repo-level copies a PR branch could
+    # read can be deleted (muk#2266 stage 4). `deployment: false`: this job
+    # deploys nothing and must not write a Deployment record DORA would count.
+    # The billing token is still the caller's repo-level one.
+    environment:
+      name: Production
+      deployment: false
     steps:
       - name: What this job is for
         run: |
@@ -424,6 +432,13 @@ jobs:
     name: Sweep stranded e2e events
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
+    # This job WRITES (it deletes rows), so it takes the owner connection
+    # string from the caller's main-only `production-backend` environment and
+    # keeps working once the repo-level SUPABASE_DB_URL is narrowed to a
+    # read-only role (muk#2266). `deployment: false`: no Deployment record.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
