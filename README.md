@@ -127,6 +127,11 @@ functions. The three main-only deploy jobs name a caller environment
 secrets can move from the caller's repository store into an environment
 restricted to `main`; until they do, the job reads the secret the caller
 passes, as before.
+The same holds for three jobs that run on a schedule: `quota` in
+`muk-scheduled-checks.yml` names `Production` (the Vercel token and team id),
+and `sweep` there and the job in `muk-browser-matrix.yml` name
+`production-backend`, because they write to the database and must keep the
+owner connection string when the caller's repo-level one becomes read-only.
 
 Every job's `timeout-minutes` stays at or under 60
 (`scripts/check-workflows.mjs`): muk.events' stuck-run reaper cancels any job
