@@ -92,9 +92,26 @@ jobs:
           rm -rf .next/cache
           ln -s "$keep" .next/cache
 
+      # Only the default branch SAVES this cache. The key carries a hash of
+      # every source file, so a job that saves writes a new 20-30 MB entry on
+      # each push, and a cache saved on a pull request ref is readable by
+      # that pull request alone. Saving everywhere left comunistas with 30
+      # entries and 1108 MB of the repo's 10 GB on 2026-11-19, most of them
+      # one-use copies per PR ref. A pull request restores the newest entry
+      # from the default branch through restore-keys, which is the seed it
+      # was getting anyway, and writes nothing.
       - name: Cache Next.js build
-        if: ${{ runner.environment == 'github-hosted' }}
+        if: ${{ runner.environment == 'github-hosted' && github.ref_name == github.event.repository.default_branch }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-
+
+      - name: Restore Next.js build cache (read-only off the default branch)
+        if: ${{ runner.environment == 'github-hosted' && github.ref_name != github.event.repository.default_branch }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx') }}
