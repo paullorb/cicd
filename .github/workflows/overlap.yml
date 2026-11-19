@@ -23,6 +23,10 @@ concurrency:
 
 jobs:
   overlap:
+    # This repository is public and has an `app-ci` runner on the Mac Studio,
+    # which pr-overlap.yml runs on by default. A fork's pull request must
+    # never reach that machine, so it gets no overlap comment at all.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/pr-overlap.yml
     with:
       ignore: |

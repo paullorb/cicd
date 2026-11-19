@@ -1,33 +1,43 @@
 name: muk.events runner watchdog
 
-# The router for the self-hosted migration. Every other workflow reads its
-# runs-on labels from the MUK_CI_LABELS repo variable; this is the only job
-# that must stay on GitHub-hosted runners, because its whole purpose is to
-# work when the runner box does not.
+# The alarm for the self-hosted pool, from outside it. Every other workflow
+# reads its runs-on labels from the MUK_CI_LABELS repo variable; this is the
+# only scheduled job that must stay on GitHub-hosted runners, because its
+# whole purpose is to work when the runner box does not.
 #
-# Why a 6-hourly watchdog and not a per-run router job: a router fronting
-# every CI run would itself bill one hosted minute per run (~340 CI runs a
-# month — more than this month's remaining budget on its own). Flipping a
-# variable out-of-band costs ~4 billed minutes a day and routing stays free
-# on every actual CI run. The trade-off is failover lag: with the box down,
-# CI sits queued for up to 6 hours before the flip. workflow_dispatch is the
-# manual override — runnable from the GitHub mobile app.
+# It no longer fails CI over to hosted runners. Until 2026-11 it flipped
+# MUK_CI_LABELS to ["ubuntu-latest"] when the pool was down, and that flip is
+# not narrow: the variable routes EVERY workflow, so the heartbeat (every 15
+# minutes), the reaper, the nightlies and each PR's browser suite all moved to
+# billed minutes at once. The one episode of November 2026 (06 to 07) cost 263
+# hosted minutes in a day, 42% of the repo's month, for a box that needed one
+# login. A queue that waits for the box costs nothing; so the pool being down
+# is now an alarm and a task, never a spend:
+#
+#   - no `muk-ci` runner online: the run fails (GitHub emails the owner) and
+#     one `for-paul` issue is opened with the restart command, so it shows on
+#     status.paullorber.com until the pool is back, when it closes itself;
+#   - no runner carries `muk-e2e` while MUK_E2E_LABELS asks for it: the same
+#     alarm, since the required browser check would queue for ever;
+#   - routing is only ever moved HOME: a MUK_CI_LABELS or MUK_E2E_LABELS left
+#     on a hosted label by hand is set back to the pool once it is online, so
+#     the manual escape hatch cannot be forgotten switched on.
+#
+# The escape hatch itself stays manual and deliberate: set MUK_CI_LABELS to
+# ["ubuntu-latest"] in Settings → Secrets and variables → Actions → Variables.
+# That is a decision to spend the quota, which is why no job takes it.
+#
+# The Mac-side dead-man's switch (muk.events' scripts/runner-heartbeat.mjs,
+# healthchecks.io, every 5 minutes) is the fast alarm; this is the slow second
+# one that does not depend on that script or its URL file, which is why the
+# caller schedules it once a day and not every six hours.
 #
 # Two modes:
 #   - With the RUNNER_WATCHDOG_TOKEN secret (fine-grained PAT for this repo,
-#     Administration: read + Variables: read/write — and, to auto-reroute
-#     stranded PRs, Actions: read/write): checks whether any muk-ci runner is
-#     online and sets MUK_CI_LABELS to the self-hosted pool or ubuntu-latest
-#     accordingly. When it flips to ubuntu-latest it also cancels any PR CI
-#     runs stuck in queue against the dead pool, so ci-retry.yml reruns them on
-#     the hosted label — no manual dispatch. Fails (= emails the owner)
-#     whenever the pool is down, so the flip never happens silently. If the PAT
-#     lacks Actions:write the cancel is skipped with a warning; everything else
-#     is unaffected.
-#   - Without it: cannot read runner status or write variables, so it only
-#     looks for CI runs stuck in queue and fails to raise the alarm; routing
-#     then has to be flipped by hand in Settings → Secrets and variables →
-#     Actions → Variables.
+#     Administration: read + Variables: read/write): reads the runners' real
+#     status.
+#   - Without it: cannot read runner status, so it only looks for runs stuck
+#     in queue and raises the same alarm.
 
 on:
   workflow_call:
@@ -37,6 +47,7 @@ on:
 
 permissions:
   actions: read
+  issues: write
 
 concurrency:
   group: runner-watchdog
@@ -44,134 +55,124 @@ concurrency:
 
 jobs:
   route:
-    name: Route CI to a live runner pool
+    name: The runner pool is online
+    # Hosted on purpose, and the reason is in the header: allowlisted as the
+    # watchdog in paullorb/paullorber's scripts/lib/hosted-runners.mjs.
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # A handful of API calls; a billed minute is the unit, so nothing here may
+    # install, check out or wait.
+    timeout-minutes: 3
     steps:
       - name: What this job is for
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
-          #### Route CI to a live runner pool
+          #### The runner pool is online
 
-          The failover switch for the self-hosted runners. Every other job reads its runner labels from a repository variable; this is the only job that must stay on GitHub-hosted runners, because its entire purpose is to work when the runner machine does not.
+          The alarm for the self-hosted runners, run from outside them: it is the only scheduled job on GitHub-hosted runners, because its entire purpose is to work when the runner machine does not.
 
-          ❌ Doubles as the runner-is-down alarm. With the token configured, routing has already flipped to hosted runners automatically and CI keeps working with up to six hours of failover lag; without it, flip `MUK_CI_LABELS` by hand in the repository variables.
+          ❌ No `muk-ci` runner is online (or none carries `muk-e2e`), so CI is queueing. Nothing fails over to hosted runners: log in to the Mac Studio and run the command in the `for-paul` issue this job opened. It closes itself on the next green run.
           TLDR
 
-      - name: Check muk-ci runners and set MUK_CI_LABELS
+      - name: Check the muk-ci runners
         env:
           GH_TOKEN: ${{ secrets.RUNNER_WATCHDOG_TOKEN }}
           FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SELF_HOSTED: '["self-hosted","muk-ci"]'
-          HOSTED: '["ubuntu-latest"]'
           E2E_SELF_HOSTED: '["self-hosted","muk-e2e"]'
+          ISSUE_TITLE: "Self-hosted runners are offline: CI is queueing"
         run: |
+          set -uo pipefail
+          problem=""
+
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::RUNNER_WATCHDOG_TOKEN not set — automatic failover is disabled. Create a fine-grained PAT for this repo with Administration:read and Variables:read/write and store it as that secret."
+            echo "::warning::RUNNER_WATCHDOG_TOKEN not set, so runner status cannot be read. Create a fine-grained PAT for this repo with Administration:read and Variables:read/write and store it as that secret."
             export GH_TOKEN="$FALLBACK_TOKEN"
-            # Degraded mode: infer trouble from CI runs stuck in queue. A run
-            # can also queue behind a busy runner, so use a generous age.
-            cutoff="$(date -u -v-45M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '45 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+            # Degraded mode: infer trouble from runs stuck in queue. A run can
+            # also queue behind a busy runner, so use a generous age.
+            cutoff="$(date -u -d '45 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
             stuck=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?status=queued&per_page=50" \
-              --jq "[.workflow_runs[] | select(.created_at < \"$cutoff\")] | length")
+              --jq "[.workflow_runs[] | select(.created_at < \"$cutoff\")] | length") || stuck=0
             if [ "$stuck" -gt 0 ]; then
-              echo "::error::$stuck workflow run(s) have been queued for over 45 minutes — the muk-ci runners are probably down (or just very busy). Bring the box back, or flip MUK_CI_LABELS to [\"ubuntu-latest\"] in Settings → Variables."
-              exit 1
+              problem="$stuck workflow run(s) have been queued for over 45 minutes, so the muk-ci runners are probably down (or very busy)."
+            else
+              echo "No stuck runs; assuming the muk-ci pool is healthy."
             fi
-            echo "No stuck runs; assuming the muk-ci pool is healthy."
+          else
+            runners="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runners?per_page=100")" || {
+              echo "::error::Could not read the runners (RUNNER_WATCHDOG_TOKEN expired, or without Administration:read). Renew it; until then this alarm is blind."
+              exit 1
+            }
+            online=$(jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-ci"))] | length' <<<"$runners")
+            e2e_online=$(jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-e2e"))] | length' <<<"$runners")
+            echo "$online muk-ci runner(s) online, $e2e_online of them labelled muk-e2e."
+
+            # Home only. A variable that is missing needs nothing: every
+            # workflow's `|| '["self-hosted","muk-ci"]'` already routes home.
+            current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" --jq '.value' 2>/dev/null || echo "")
+            if [ "$online" -ge 1 ] && [ -n "$current" ] && [ "$current" != "$SELF_HOSTED" ]; then
+              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" \
+                -f name=MUK_CI_LABELS -f value="$SELF_HOSTED" >/dev/null
+              echo "::warning::MUK_CI_LABELS was '$current' while the pool is online; set back to '$SELF_HOSTED'."
+            fi
+            e2e_current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" --jq '.value' 2>/dev/null || echo "")
+            if [ "$e2e_online" -ge 1 ] && [ -n "$e2e_current" ] && [ "$e2e_current" != "$E2E_SELF_HOSTED" ]; then
+              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" \
+                -f name=MUK_E2E_LABELS -f value="$E2E_SELF_HOSTED" >/dev/null
+              echo "::warning::MUK_E2E_LABELS was '$e2e_current' while a muk-e2e runner is online; set back to '$E2E_SELF_HOSTED'."
+            fi
+
+            if [ "$online" -eq 0 ]; then
+              problem="No muk-ci runner is online."
+            elif [ "$e2e_online" -eq 0 ] && [ "$e2e_current" = "$E2E_SELF_HOSTED" ]; then
+              # Counted over the muk-e2e SUBSET: with every one of those
+              # offline and an ordinary runner up, the required browser check
+              # queues for ever with nothing red to say why.
+              problem="$online muk-ci runner(s) are online but none carries the muk-e2e label, so every pull request's browser suite is queueing. Label one: gh api -X POST /repos/$GITHUB_REPOSITORY/actions/runners/<id>/labels -f 'labels[]=muk-e2e'"
+            fi
+          fi
+
+          # The issue is written with the job's own token: the PAT has no
+          # Issues scope and does not need one.
+          export GH_TOKEN="$FALLBACK_TOKEN"
+          open=$(gh api "/repos/$GITHUB_REPOSITORY/issues?state=open&labels=for-paul&per_page=100" \
+            --jq "[.[] | select(.title == \"$ISSUE_TITLE\") | .number] | first // empty" 2>/dev/null || echo "")
+
+          if [ -z "$problem" ]; then
+            if [ -n "$open" ]; then
+              gh api -X POST "/repos/$GITHUB_REPOSITORY/issues/$open/comments" \
+                -f body="The pool is back: the watchdog found it online at $(date -u +%Y-%m-%dT%H:%MZ). Closing." >/dev/null || true
+              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/issues/$open" -f state=closed -f state_reason=completed >/dev/null || true
+              echo "Closed #$open: the pool is back."
+            fi
             exit 0
           fi
 
-          online=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runners" \
-            --jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-ci"))] | length')
-          current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" --jq '.value' 2>/dev/null || echo "")
+          body_file="$RUNNER_TEMP/runner-issue.md"
+          {
+            echo "$problem Found by the hosted watchdog at $(date -u +%Y-%m-%dT%H:%MZ) ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo
+            echo "Nothing fails over to GitHub-hosted runners: CI queues until the pool is back, and queued runs start by themselves once it is."
+            echo
+            echo "On the Mac Studio, logged in (the runners are LaunchAgents, and after a cold boot FileVault waits at the unlock screen):"
+            echo
+            echo '```sh'
+            # shellcheck disable=SC2016 # printed for a person to paste, not expanded here
+            echo 'for d in ~/actions-runner-*; do (cd "$d" && ./svc.sh start; ./svc.sh status | tail -2); done'
+            echo '```'
+            echo
+            echo "Still offline after that: the runbook is \"When the runners are down\" in paullorb/cicd's README."
+            echo
+            echo "This issue closes itself on the watchdog's next green run (dispatch \`Runner watchdog\` to have that now)."
+          } > "$body_file"
 
-          if [ "$online" -ge 1 ]; then desired="$SELF_HOSTED"; else desired="$HOSTED"; fi
-
-          # PATCH cannot bootstrap a deleted variable (separate create/update
-          # endpoints — Codex P2 on PR #144), and routing must keep working in
-          # exactly that state, so recreate it when the GET came back empty.
-          if [ -z "$current" ]; then
-            gh api -X POST "/repos/$GITHUB_REPOSITORY/actions/variables" \
-              -f name=MUK_CI_LABELS -f value="$desired"
-            echo "MUK_CI_LABELS was missing — created as '$desired' ($online muk-ci runner(s) online)"
-          elif [ "$current" != "$desired" ]; then
-            gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" \
-              -f name=MUK_CI_LABELS -f value="$desired"
-            echo "MUK_CI_LABELS: '$current' -> '$desired' ($online muk-ci runner(s) online)"
+          if [ -z "$open" ]; then
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/issues" \
+              -f title="$ISSUE_TITLE" -f "labels[]=for-paul" -F body=@"$body_file" --jq '"Opened #\(.number)."' \
+              || echo "::warning::Could not open the for-paul issue (the caller must grant issues: write); the failed run is the only alarm."
           else
-            echo "MUK_CI_LABELS already '$current' ($online muk-ci runner(s) online)"
+            gh api -X PATCH "/repos/$GITHUB_REPOSITORY/issues/$open" -F body=@"$body_file" >/dev/null || true
+            echo "Rewrote #$open: still down."
           fi
 
-          # MUK_E2E_LABELS routes the browser suite at a LABELLED SUBSET of the
-          # pool — that subset size is what caps how many e2e jobs run at once
-          # (muk-ci.yml). It must follow this failover: left pointing at
-          # "muk-e2e" while the box is down, every e2e job queues forever
-          # against a label no hosted runner carries, and the required check
-          # never reports. Only touched when it EXISTS — unset means the caller
-          # has not opted into lane routing, and creating it here would enable a
-          # feature by way of a failover.
-          e2e_current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" --jq '.value' 2>/dev/null || echo "")
-          if [ -n "$e2e_current" ]; then
-            # Counted over the muk-e2e SUBSET, not `online` — those are
-            # different populations, and the difference is a silent hang. Only
-            # some runners carry muk-e2e; if every one of THOSE is offline
-            # while an ordinary muk-ci runner is still up, `online` is nonzero,
-            # so this would keep routing e2e at a label nothing live carries,
-            # and the alarm-and-cancel branch below (gated on `online` being 0)
-            # would not fire either. The required check would simply queue
-            # forever, with nothing red to say why.
-            e2e_online=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runners" \
-              --jq '[.runners[] | select(.status == "online") | select(any(.labels[]; .name == "muk-e2e"))] | length')
-            if [ "$e2e_online" -ge 1 ]; then e2e_desired="$E2E_SELF_HOSTED"; else e2e_desired="$HOSTED"; fi
-            # Worth saying out loud: the pool is up, so nothing else in this
-            # job will mention that the browser suite just lost its home.
-            if [ "$e2e_online" -eq 0 ] && [ "$online" -ge 1 ]; then
-              echo "::warning::No online runner carries muk-e2e, though $online muk-ci runner(s) are up — routing the browser suite to hosted runners. Label a runner muk-e2e (gh api -X POST /repos/$GITHUB_REPOSITORY/actions/runners/<id>/labels -f 'labels[]=muk-e2e') to bring it home."
-            fi
-            if [ "$e2e_current" != "$e2e_desired" ]; then
-              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" \
-                -f name=MUK_E2E_LABELS -f value="$e2e_desired"
-              echo "MUK_E2E_LABELS: '$e2e_current' -> '$e2e_desired'"
-            else
-              echo "MUK_E2E_LABELS already '$e2e_current'"
-            fi
-          fi
-
-          if [ "$online" -eq 0 ]; then
-            # Routing now points at ubuntu-latest, but a PR whose CI run was
-            # dispatched while the pool was dead is stuck in `queued` against the
-            # self-hosted label and will sit there forever: a queued run never
-            # reaches the `cancelled` conclusion that ci-retry.yml waits on, so
-            # nothing reruns it. Cancel those runs here — the cancel makes
-            # ci-retry rerun each one, and the rerun re-reads MUK_CI_LABELS (just
-            # flipped to hosted) and lands on ubuntu-latest. No manual dispatch.
-            #
-            # Only pull_request runs of muk's CI workflow: ci-retry rescues PR
-            # runs only, so cancelling a queued main-push run would kill its
-            # deploy with nothing to resurrect it — leave those for a returning
-            # runner or a human. The >5-min age guard skips a run that was
-            # created as the box died and might still get picked up.
-            #
-            # Cancel with the PAT, never the implicit GITHUB_TOKEN: a run
-            # cancelled by GITHUB_TOKEN does NOT emit the workflow_run event that
-            # triggers ci-retry, so the rescue would silently do nothing. This
-            # needs Actions:write on RUNNER_WATCHDOG_TOKEN (alongside its
-            # existing Administration:read + Variables:read/write). Until that
-            # scope is added the cancel 403s — warn and carry on, so routing and
-            # the alarm below are unaffected and behaviour degrades to today's
-            # (flip + manual re-run), not worse.
-            cutoff="$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
-            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=queued&event=pull_request&per_page=50" \
-              --jq ".workflow_runs[] | select(.created_at < \"$cutoff\") | .id" 2>/dev/null \
-            | while read -r run_id; do
-                [ -n "$run_id" ] || continue
-                if gh api -X POST "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/cancel" >/dev/null 2>&1; then
-                  echo "Cancelled stranded queued PR run $run_id — ci-retry will rerun it on ubuntu-latest."
-                else
-                  echo "::warning::Could not cancel queued run $run_id (RUNNER_WATCHDOG_TOKEN likely lacks Actions:write). Add that scope so stranded PRs auto-reroute; until then re-run them by hand from the Actions tab."
-                fi
-              done || true  # a failed GET must not pre-empt the alarm below
-            echo "::error::No muk-ci runner online — CI is routed to ubuntu-latest and is burning paid minutes. Bring the box back; the next watchdog run (or a manual dispatch of this workflow) routes CI home."
-            exit 1
-          fi
+          echo "::error::$problem CI is queueing, not failing over. See the for-paul issue for the restart command."
+          exit 1
