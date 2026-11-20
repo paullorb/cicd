@@ -91,7 +91,12 @@ jobs:
             # also queue behind a busy runner, so use a generous age.
             cutoff="$(date -u -d '45 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
             stuck=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?status=queued&per_page=50" \
-              --jq "[.workflow_runs[] | select(.created_at < \"$cutoff\")] | length") || stuck=0
+              --jq "[.workflow_runs[] | select(.created_at < \"$cutoff\")] | length") || {
+              # A failed lookup is no evidence the pool is up: fail without
+              # touching (or closing) the for-paul issue.
+              echo "::error::Could not read the queued runs, so this alarm is blind this time. Any open for-paul issue is left as it is."
+              exit 1
+            }
             if [ "$stuck" -gt 0 ]; then
               problem="$stuck workflow run(s) have been queued for over 45 minutes, so the muk-ci runners are probably down (or very busy)."
             else
