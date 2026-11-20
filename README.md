@@ -39,24 +39,83 @@ Two pools, chosen per caller repository via a repository variable so routing
 can be flipped without a commit:
 
 - **muk.events** uses `MUK_CI_LABELS`, normally `["self-hosted","muk-ci"]` —
-  the three repository-level runners on the Mac Studio.
-  `muk-runner-watchdog.yml` flips the variable to `["ubuntu-latest"]` when no
-  runner is online, and back.
+  the four repository-level runners on the Mac Studio.
 - **Every other repo** uses `CI_LABELS`, defaulting to
   `["self-hosted","app-ci"]`. Repository-level runners on a personal account
   serve exactly one repository, so the muk-ci pool is not reachable from other
   repos; instead each caller registers its own `app-ci` runner(s) on the same
   Mac Studio (`~/actions-runner-<repo>`, one LaunchAgent each — see "Adding a
-  repository"). Hosted minutes reached 90% of the account's monthly cap on
-  2026-10-19, so GitHub-hosted is now the manual escape hatch, not the
-  default: set `CI_LABELS` to `["ubuntu-latest"]` in the repo's variables
-  while the box is down, and clear it after. There is no watchdog for these
-  pools (one would cost hosted minutes on every tick); the muk heartbeat
-  alerts when the box itself is down.
-- **Dependabot's pull requests** run on `ubuntu-latest` whatever the
-  variable says, in every routed job: a bumped package's install script or
-  tests on a persistent box is the one blast radius a disposable VM is worth.
-  That is the only hosted use left by design.
+  repository").
+
+### Hosted minutes: what may spend them
+
+The account's 3,000 hosted minutes a month are spent only by **private**
+repositories (standard hosted runners are free for public ones), and every
+private repo has its own runner, so hosted is the exception that has to
+explain itself. Three things are hosted by design:
+
+- **Dependabot's pull requests** run on `ubuntu-latest` whatever the variable
+  says, in every routed job: a bumped package's install script or tests on a
+  persistent box is the one blast radius a disposable VM is worth. In
+  `muk-ci.yml` Dependabot's own run is only the handover (two short jobs; the
+  header there says why), and the run that decides the PR is on the pool.
+- **`muk-runner-watchdog.yml`**, once a day: the alarm for the runners cannot
+  run on them.
+- **muk's Android bundle** (`android_runs_on: '"ubuntu-latest"'`): the Mac
+  Studio has no Android SDK.
+
+Everything else is a finding. paullorber's `scripts/issue-keeper.mjs` reads
+every private repo's workflows and label variables (and this repo's reusable
+workflows, which bill their caller) once an hour and files a `for-paul` issue
+for any hosted runner outside the allowlist in its
+`scripts/lib/hosted-runners.mjs`; a new hosted job is added there, with its
+reason and its monthly cost, in the PR that introduces it.
+
+**Nothing fails over to hosted runners.** `muk-runner-watchdog.yml` used to
+flip `MUK_CI_LABELS` to `["ubuntu-latest"]` when the pool was down; one such
+day (2026-11-07) cost 263 minutes, because the variable routes every workflow
+at once. A down runner is now a queue that waits, an alarm and a task (next
+section). Setting `CI_LABELS` or `MUK_CI_LABELS` to `["ubuntu-latest"]` by
+hand remains the escape hatch, as a decision to spend the quota; the keeper
+files it as a finding and muk's watchdog sets muk's back once the pool is up.
+
+Expected spend in muk with this in place, from November 2026's runs: about
+30 minutes for the watchdog, about 70 for Android builds, about 50 for
+Dependabot's pull requests (2 per push for the handover, about 4 for the
+auto-fix and impact jobs) and about 30 for Dependabot's own update jobs:
+roughly 180 a month against November's 629. The other private repos billed
+nothing in November because their Dependabot jobs waited for a `dependabot`
+runner; once those run hosted, each update job is about 2 minutes and each
+Dependabot push one `app-ci.yml` job.
+
+## When the runners are down
+
+Queued runs are not lost: they start by themselves when a runner comes back
+(GitHub gives up on a job only after it has been queued for a day).
+
+One command restarts every runner on the Mac Studio; it is safe to run when
+they are already up:
+
+```sh
+for d in ~/actions-runner-*; do (cd "$d" && ./svc.sh start; ./svc.sh status | tail -2); done
+```
+
+What can go wrong, what notices, and what brings it back:
+
+| Failure | Noticed by | Comes back by itself? | By hand |
+| --- | --- | --- | --- |
+| **Mac reboot or power cut** | muk's `runner-heartbeat` LaunchAgent stops pinging healthchecks.io (minutes); muk's daily hosted watchdog (email + `for-paul` issue) | A macOS update's own restart: yes, so far. A cold boot: no. Every runner is a LaunchAgent, so it starts at **login**, FileVault waits at the unlock screen, and the Mac does not power on after a power cut (`pmset autorestart` is 0). | Log in. All 13 runner agents, the keeper and the collector start with the session. `sudo pmset -a autorestart 1` makes a power cut end at the unlock screen instead of off. |
+| **Runner process crash** | status.paullorber.com (each runner's listening / online state, every collector run); the keeper's queue issue after 45 minutes | The listener, on a retryable exit or a self-update: yes, `runsvc.sh` relaunches it after 5 seconds, up to 10 times in a row. After a terminal exit or the tenth retry, or when `runsvc.sh` itself dies: no, the plists `svc.sh install` writes have `RunAtLoad` and no `KeepAlive`. | `cd ~/actions-runner-<repo> && ./svc.sh start` (or the loop above). Logs: `~/Library/Logs/actions.runner.*/` and `_diag/Runner_*.log`. |
+| **Runner offline while jobs queue** | paullorber's keeper, every 15 minutes: a run queued for over 45 minutes opens a `for-paul` issue in that repo, naming whether its runners are offline, busy or missing the label; closes itself when the queue moves | No failover. The runs wait. | The loop above. A run that asks for a label no runner carries (`muk-e2e`, or Dependabot's `dependabot` when "Dependabot on self-hosted runners" is on) waits for ever: fix the label or the setting. |
+| **A stuck job holding a runner** | muk: `stuck-run-reaper.yml` cancels any run with a job past 75 minutes (every 30 minutes, itself on the pool). Elsewhere: the queue issue says "online and busy" | Every job has `timeout-minutes` (60 at most here, checked by `scripts/check-workflows.mjs`; muk pins its own), which the runner enforces. A runner too wedged to enforce it: only in muk, by the reaper. | `gh run cancel <id> -R paullorb/<repo>`, then `gh api -X POST repos/paullorb/<repo>/actions/runs/<id>/force-cancel` if it does not let go, then `./svc.sh stop && ./svc.sh start` in that runner's directory. |
+| **Registration or token expiry** | The runner shows offline on the dashboard while its process is listening; `_diag/Runner_*.log` has the 401/403. `RUNNER_WATCHDOG_TOKEN`: the watchdog fails saying so, and muk's nightly "Credentials before they expire" warns ahead. | No. GitHub deletes a runner that has not connected for 14 days; a runner in use never expires. | Re-register in its directory: `./svc.sh stop; ./svc.sh uninstall; ./config.sh remove --token "$(gh api -X POST repos/paullorb/<repo>/actions/runners/remove-token --jq .token)"`, then the `config.sh` and `svc.sh install && ./svc.sh start` lines of "Adding a repository" with the same name and labels (muk's: `muk-ci`, and `muk-e2e` where it had it). |
+| **Disk full** | muk's `runner-heartbeat` pings `/fail` under its free-disk threshold; the dashboard's disk bar and storage panel | No. | `du -sh ~/actions-runner-*/_work ~/actions-runner-*/_diag \| sort -h`; a runner's `_work` can be deleted while it is stopped. `docker system prune` for the lanes' images; `npm run worktrees:sweep -- --apply` in muk. |
+
+Still open, and the owner's to close (each is a change on the Mac, which no
+workflow here makes): `KeepAlive` in the runner plists, so launchd restarts a
+`runsvc.sh` that died; `pmset autorestart 1`; and a runner for a private repo
+that has none (`alteschersheimrc` selects hosted through `CI_LABELS` until
+then).
 
 Concurrent PRs from several repos are safe by construction: each repo's
 runner(s) serve only that repo, migration-replay scratch databases are named

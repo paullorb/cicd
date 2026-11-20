@@ -155,15 +155,34 @@ env:
 # is the one PR whose code nobody wrote — a malicious package could target the
 # persistent Mac Studio (and the mirrored Dependabot secrets) from an install
 # script or a test. Hosted VMs are disposable, so that blast radius dies with
-# the job. This is the same execution path as the runner-watchdog hosted
-# fallback, so it needs no extra maintenance. Belt-and-braces with this,
+# the job. Belt-and-braces with this,
 # `npm ci --ignore-scripts` below keeps lifecycle scripts from running on ANY
 # PR (verified 2026-07-22: check + build + e2e need no install scripts;
 # Playwright browsers install in their own explicit step).
+#
+# The Dependabot handover. A run Dependabot triggers is served the Dependabot
+# secret store, so `rules` fails its secrets assertion in seconds, by design;
+# that red is what makes the caller's post-ci push an empty commit as the PAT's
+# owner, and the run THAT starts (actor: a person, Actions secrets, the pool)
+# is the one that decides the pull request. Dependabot's own run therefore
+# decides nothing, and it is the one that bills hosted minutes: in November
+# 2026 its seven runs cost 145 minutes of the account's 3,000, 89 of them a
+# browser suite that failed on the Linux image six times out of seven. So on
+# that run every job but `rules` (the handover red) and the `Playwright e2e`
+# gate (fail-closed on a skipped suite) is skipped: two billed minutes a
+# Dependabot push instead of about twenty. Two required checks stay red on
+# Dependabot's head, so the skipped ones cannot let it merge.
+#
+# What this does NOT do: the deciding run executes the bumped packages on the
+# Mac Studio. Routing it to a hosted VM too (by branch prefix, as app-ci.yml
+# does) is the containment this comment's first paragraph describes, and it
+# needs the browser suite to pass on Linux first.
 
 jobs:
   quality:
     name: Lint, typecheck, edge functions & build
+    # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 25
     steps:
@@ -226,6 +245,8 @@ jobs:
   # No secrets needed, so it runs identically on forks and Dependabot PRs.
   secret-scan:
     name: Secret scan (gitleaks)
+    # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     permissions:
@@ -293,7 +314,8 @@ jobs:
   # PRs: they skip the audit step and the check stays green.
   deps-audit:
     name: Dependency audit (lockfile PRs)
-    if: github.event_name == 'pull_request'
+    # Not on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     # Five 90-second attempts against the advisory endpoint, plus checkout.
     timeout-minutes: 12
@@ -451,9 +473,9 @@ jobs:
                 echo "\`$missing\` are invisible here. This job would otherwise pass while checking"
                 echo "nothing, so it fails instead."
                 echo
-                echo "**This failure is expected and says nothing about the bump itself;** other jobs"
-                echo "report on that. The run that decides this pull request is the next one,"
-                echo "started under a normal identity."
+                echo "**This failure is expected and says nothing about the bump itself.** The run"
+                echo "that decides this pull request is the next one, started under a normal"
+                echo "identity; every other job is skipped here and runs there."
               } >> "$GITHUB_STEP_SUMMARY"
             else
               echo "::error::Missing secret(s):$missing — every check in this job would silently pass while enforcing nothing. A secret has been rotated, renamed or deleted; restore it before merging anything."
@@ -548,7 +570,8 @@ jobs:
   # stay green.
   sync:
     name: Prod sync (edge functions)
-    if: github.event_name == 'pull_request'
+    # Not on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     permissions:
@@ -639,6 +662,8 @@ jobs:
   # shared ledger) are skipped, exactly as `supabase db push` skips them.
   migrations:
     name: Migrations replay (scratch Postgres)
+    # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
     runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     env:
@@ -825,7 +850,8 @@ jobs:
   # in ~5s having tested nothing. It can now run the real suite.
   e2e:
     name: Playwright e2e (lane)
-    if: github.event_name == 'pull_request'
+    # Not on Dependabot's own run: see "The Dependabot handover" at the top.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     # MUK_E2E_LABELS is how many e2e jobs may run at once: it names the subset
     # of the pool whose runners are labelled for the browser suite, and a runner
     # executes one job at a time, so "two labelled runners" IS "at most two

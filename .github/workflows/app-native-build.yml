@@ -87,15 +87,20 @@ on:
       # archive on every native-touching pull request is worth having, and worth
       # not paying ten times over. Android stays on ubuntu-latest, where the
       # image ships the SDK the Gradle build expects.
+      # Both default to the caller's own pool, like pr-overlap.yml's `runs_on`:
+      # hosted minutes are account-wide (and a macOS one bills as ten), so a
+      # hosted image is something a caller asks for by name, with its reason in
+      # paullorb/paullorber's scripts/lib/hosted-runners.mjs, never what a
+      # caller that passes nothing gets.
       android_runs_on:
-        description: JSON runner labels for the Android job.
+        description: JSON runner labels for the Android job. The pool needs the Android SDK; a caller without one passes '"ubuntu-latest"'.
         required: false
-        default: '"ubuntu-latest"'
+        default: '["self-hosted","app-ci"]'
         type: string
       ios_runs_on:
         description: JSON runner labels for the iOS job.
         required: false
-        default: '"macos-15"'
+        default: '["self-hosted","app-ci"]'
         type: string
 
 permissions:
