@@ -82,6 +82,15 @@ jobs:
     # ~2h of blocked CI across legs; 2026-08-16, a 200-minute cancelled run).
     # Twice the measured run is still comfortably below the stuck-run reaper.
     timeout-minutes: 25
+    # The run-scoped sweep below WRITES to production, so SUPABASE_DB_URL is
+    # the owner string from the caller's main-only `production-backend`
+    # environment, not the repo-level copy that is being narrowed to a
+    # read-only role (muk#2266). Every other secret is still the caller's
+    # repo-level one. `deployment: false`: no Deployment record. A dispatch
+    # from any branch but main is refused by the environment, on purpose.
+    environment:
+      name: production-backend
+      deployment: false
     env:
       # :3100 is the port the PR e2e job USED to own. That job now runs in a
       # lane with a port of its own (3101-3104, scripts/stack-lane.mjs in
