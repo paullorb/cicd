@@ -22,6 +22,8 @@ the secrets its workflow requires.
 | `app-native-build.yml` | generic Capacitor apps | unsigned iOS and Android release artifacts; `build_ios` / `build_android` select platforms |
 | `app-content-check-probe.yml` | generic apps | path-scoped, secret-bearing PR comment proof |
 | `pr-overlap.yml` | any repo | pull requests; comments which other open PRs change the same files |
+| `app-auto-merge.yml` | any repo | pull requests; arms auto-merge (squash) with the automation app's token |
+| `app-supabase.yml` | any repo with `supabase/` | pushes to `main` and manual; applies migrations, then deploys edge functions |
 
 `app-ci.yml` is the generic entry point for a Next.js app (lint, audit, build,
 and migration replay when migrations exist; no secrets). New repos should
@@ -140,6 +142,61 @@ Do not enable GitHub's remote npm cache on the persistent runners. The local
 `~/.npm` cache survives jobs; the former Actions cache restored a 1.4 GB
 archive in every cache-enabled job.
 
+## The baseline every repo shares
+
+A cloned paullorb repo is set up the same way wherever its product allows.
+What "the same" means, and where each part lives:
+
+| Part | Where | The same in every repo |
+|---|---|---|
+| CI | caller `ci.yml` → `app-ci.yml` | every pull request and every push to `main`; a bespoke job only where the product is not a Next.js app (hush, kairos, lacordobesa, muk) |
+| Overlap comment | caller `pr-overlap.yml` → `pr-overlap.yml` | informational, never required |
+| Auto-merge | caller `auto-merge.yml` → `app-auto-merge.yml` | squash, armed when a non-draft PR into `main` opens; never for forks or Dependabot |
+| Supabase deploy | caller `supabase.yml` → `app-supabase.yml` | only in repos with `supabase/`; on when `SUPABASE_PROJECT_REF` is set |
+| Pin | every `uses: paullorb/cicd/...@<SHA>` | one SHA per repo, the same in all of its callers |
+| Repository settings | GitHub | auto-merge allowed, head branches deleted on merge, "Always suggest updating pull request branches" |
+| `main` | ruleset "main protection" | no deletion, no force push, a pull request with 0 approvals, the repo's CI check required |
+| Local branches and worktrees | paullorber's `repo-sweep` LaunchAgent (muk: its own `com.muk.sweep`) | removed once their work is proven merged |
+| Agent rules | `AGENTS.md` (`CLAUDE.md` links to it), `.claude/settings.json`, `.claude/hooks/` | the "Working as an agent here" section and the three hooks, copied from paullorber |
+| Dependabot | `.github/dependabot.yml` | weekly on Monday, grouped, npm (or pip) and GitHub Actions |
+
+muk keeps its own pipeline (`muk-ci.yml` and the other `muk-*` workflows):
+its deploy is ordered behind its own gates and is not worth re-plumbing. New
+work there should still prefer the generic parts over a muk-only one.
+
+### Auto-merge
+
+`app-auto-merge.yml` arms the merge with the automation app's token
+(`AUTOMATION_APP_ID`, `AUTOMATION_APP_PRIVATE_KEY`), else with the
+`AUTO_MERGE_TOKEN` PAT. It does not fall back to `GITHUB_TOKEN` unless the
+caller sets `github_token_fallback: true`, because a merge made under that
+token starts no workflow: `main`'s CI and any deploy on push would not run.
+A repo with neither secret gets a notice and paullorber's issue keeper arms
+its pull requests from the Mac instead.
+
+### Supabase deploy
+
+`app-supabase.yml` applies `supabase/migrations/` and then deploys
+`supabase/functions/` when `main` moves. It is switched on by settings, per
+repository:
+
+- `SUPABASE_PROJECT_REF` (repository variable): the project to deploy to.
+  Unset means the job reports "nothing deployed" and stays green.
+- `SUPABASE_ACCESS_TOKEN` (secret): needed in `shared` mode and for edge
+  functions.
+- `SUPABASE_DB_URL` (secret): needed in `push` mode.
+
+`mode: shared` is for the `paullorber` project, whose ledger holds the
+migrations of paullorber, careteam, hush and fuehrerschein: each missing file
+is applied in one transaction with its ledger row. Never run
+`supabase migration repair --status reverted` there; it deletes the other
+repos' rows. `mode: push` is for a project one repo owns (lacordobesa) and
+runs `supabase db push --include-all`.
+
+Before switching it on for a repo whose migrations were applied by hand,
+compare the ledger with the files: a file with no ledger row is applied again
+on the first run.
+
 ## Adding a repository
 
 0. Register an `app-ci` runner for the repo on the Mac Studio (a runner
@@ -160,13 +217,15 @@ archive in every cache-enabled job.
    only worth it for a repo whose PRs run several jobs at once.
 1. Point a small caller workflow in the app repo at `app-ci.yml@<SHA>`.
 2. Pass the caller's Node version file when it is not `.node-version`.
-3. Compose `app-vercel.yml` for isolated Vercel delivery and
+3. Add the `auto-merge.yml` caller, and the `supabase.yml` caller when the
+   repo has `supabase/` ("The baseline every repo shares").
+4. Compose `app-vercel.yml` for isolated Vercel delivery and
    `app-native-build.yml` for Capacitor artifacts. Secrets stay in the caller
    repository and are passed explicitly.
-4. Keep event and path filters in the caller. A path-scoped caller can invoke
+5. Keep event and path filters in the caller. A path-scoped caller can invoke
    `app-content-check-probe.yml`; its `expected_repository` guard prevents an
    accidental cross-project invocation.
-5. Migration replays support two optional per-repo files:
+6. Migration replays support two optional per-repo files:
    `scripts/ci-db-shim.sql` (objects that predate the migrations) and
    `scripts/ci-db-replay-skip.txt` (files recorded in a shared ledger but
    owned by another repo).
