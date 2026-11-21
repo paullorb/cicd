@@ -73,9 +73,9 @@ jobs:
     # one `npm run build` instead of two, which is the six minutes the old
     # comment below counted.
     name: Playwright firefox + webkit
-    # Routed like ci.yml: self-hosted muk-ci pool, with the MUK_CI_LABELS
+    # Routed like ci.yml: self-hosted muk-ci pool, with the CI_LABELS
     # variable as the offline-runner escape hatch (see runner-watchdog.yml).
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     # Both engines in one job measure ~12 minutes against production (one
     # build, then ~5-6 minutes per engine), and the point of the cap is a
     # wedged WebKit — which used to hold a runner for a full 40 (2026-07-19,

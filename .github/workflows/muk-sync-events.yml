@@ -30,7 +30,7 @@ jobs:
     # a curl call. Routed to the self-hosted pool like ci.yml; if the box is
     # down the feed just goes stale until runner-watchdog.yml re-routes, which
     # is exactly the staleness the cron already tolerates.
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # Reads MUK_SYNC_TOKEN.
     # muk#2266: read from the caller's main-only `production-backend`
