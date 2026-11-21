@@ -1660,9 +1660,12 @@ jobs:
       vars.VERCEL_DEPLOY_ENABLED == 'true'
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 20
-    # Staged like deploy-backend's (see there).
+    # Staged like deploy-backend's (see there). `production-backend`, not
+    # `Production`: the service-role key and the E2E logins it reads live there
+    # once, beside every nightly that reads them (muk#2266); `Production`
+    # holds only the Vercel credentials.
     environment:
-      name: Production
+      name: production-backend
       deployment: false
     env:
       # Not :3100 and not :3000 — nothing is served here. The suite talks to
