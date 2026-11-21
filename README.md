@@ -37,17 +37,22 @@ reusable workflow checks out the caller repository, not this one.
 
 ## Runner model
 
-Two pools, chosen per caller repository via a repository variable so routing
-can be flipped without a commit:
+Every repo routes its jobs through one repository variable, `CI_LABELS`, so
+routing can be flipped without a commit. What differs is only the pool a repo
+falls back to when the variable is unset:
 
-- **muk.events** uses `MUK_CI_LABELS`, normally `["self-hosted","muk-ci"]` —
-  the four repository-level runners on the Mac Studio.
-- **Every other repo** uses `CI_LABELS`, defaulting to
-  `["self-hosted","app-ci"]`. Repository-level runners on a personal account
-  serve exactly one repository, so the muk-ci pool is not reachable from other
-  repos; instead each caller registers its own `app-ci` runner(s) on the same
-  Mac Studio (`~/actions-runner-<repo>`, one LaunchAgent each — see "Adding a
-  repository").
+- **muk.events**: `["self-hosted","muk-ci"]`, the four repository-level
+  runners on the Mac Studio (the `muk-*` workflows' default). The variable
+  was `MUK_CI_LABELS` until 2026-11-21.
+- **Every other repo**: `["self-hosted","app-ci"]`. Repository-level runners
+  on a personal account serve exactly one repository, so the muk-ci pool is
+  not reachable from other repos; instead each caller registers its own
+  `app-ci` runner(s) on the same Mac Studio (`~/actions-runner-<repo>`, one
+  LaunchAgent each — see "Adding a repository").
+
+muk keeps `CI_LABELS` set explicitly to its pool, because the generic
+workflows it calls (`app-auto-merge.yml`, `pr-overlap.yml`) default to
+`app-ci`, a label none of its runners carry.
 
 ### Hosted minutes: what may spend them
 
@@ -74,10 +79,10 @@ for any hosted runner outside the allowlist in its
 reason and its monthly cost, in the PR that introduces it.
 
 **Nothing fails over to hosted runners.** `muk-runner-watchdog.yml` used to
-flip `MUK_CI_LABELS` to `["ubuntu-latest"]` when the pool was down; one such
+flip `CI_LABELS` to `["ubuntu-latest"]` when the pool was down; one such
 day (2026-11-07) cost 263 minutes, because the variable routes every workflow
 at once. A down runner is now a queue that waits, an alarm and a task (next
-section). Setting `CI_LABELS` or `MUK_CI_LABELS` to `["ubuntu-latest"]` by
+section). Setting `CI_LABELS` to `["ubuntu-latest"]` by
 hand remains the escape hatch, as a decision to spend the quota; the keeper
 files it as a finding and muk's watchdog sets muk's back once the pool is up.
 

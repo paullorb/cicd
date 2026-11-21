@@ -1,12 +1,12 @@
 name: muk.events runner watchdog
 
 # The alarm for the self-hosted pool, from outside it. Every other workflow
-# reads its runs-on labels from the MUK_CI_LABELS repo variable; this is the
+# reads its runs-on labels from the CI_LABELS repo variable; this is the
 # only scheduled job that must stay on GitHub-hosted runners, because its
 # whole purpose is to work when the runner box does not.
 #
 # It no longer fails CI over to hosted runners. Until 2026-11 it flipped
-# MUK_CI_LABELS to ["ubuntu-latest"] when the pool was down, and that flip is
+# CI_LABELS to ["ubuntu-latest"] when the pool was down, and that flip is
 # not narrow: the variable routes EVERY workflow, so the heartbeat (every 15
 # minutes), the reaper, the nightlies and each PR's browser suite all moved to
 # billed minutes at once. The one episode of November 2026 (06 to 07) cost 263
@@ -19,11 +19,11 @@ name: muk.events runner watchdog
 #     status.paullorber.com until the pool is back, when it closes itself;
 #   - no runner carries `muk-e2e` while MUK_E2E_LABELS asks for it: the same
 #     alarm, since the required browser check would queue for ever;
-#   - routing is only ever moved HOME: a MUK_CI_LABELS or MUK_E2E_LABELS left
+#   - routing is only ever moved HOME: a CI_LABELS or MUK_E2E_LABELS left
 #     on a hosted label by hand is set back to the pool once it is online, so
 #     the manual escape hatch cannot be forgotten switched on.
 #
-# The escape hatch itself stays manual and deliberate: set MUK_CI_LABELS to
+# The escape hatch itself stays manual and deliberate: set CI_LABELS to
 # ["ubuntu-latest"] in Settings → Secrets and variables → Actions → Variables.
 # That is a decision to spend the quota, which is why no job takes it.
 #
@@ -120,11 +120,11 @@ jobs:
 
             # Home only. A variable that is missing needs nothing: every
             # workflow's `|| '["self-hosted","muk-ci"]'` already routes home.
-            current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" --jq '.value' 2>/dev/null || echo "")
+            current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/CI_LABELS" --jq '.value' 2>/dev/null || echo "")
             if [ "$online" -ge 1 ] && [ -n "$current" ] && [ "$current" != "$SELF_HOSTED" ]; then
-              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_CI_LABELS" \
-                -f name=MUK_CI_LABELS -f value="$SELF_HOSTED" >/dev/null
-              echo "::warning::MUK_CI_LABELS was '$current' while the pool is online; set back to '$SELF_HOSTED'."
+              gh api -X PATCH "/repos/$GITHUB_REPOSITORY/actions/variables/CI_LABELS" \
+                -f name=CI_LABELS -f value="$SELF_HOSTED" >/dev/null
+              echo "::warning::CI_LABELS was '$current' while the pool is online; set back to '$SELF_HOSTED'."
             fi
             e2e_current=$(gh api "/repos/$GITHUB_REPOSITORY/actions/variables/MUK_E2E_LABELS" --jq '.value' 2>/dev/null || echo "")
             if [ "$e2e_online" -ge 1 ] && [ -n "$e2e_current" ] && [ "$e2e_current" != "$E2E_SELF_HOSTED" ]; then

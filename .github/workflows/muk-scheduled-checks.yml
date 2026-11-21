@@ -83,7 +83,7 @@ permissions:
 env:
   SUPABASE_PROJECT_REF: ${{ inputs.supabase_project_ref }}
 
-# Every job here runs on the self-hosted muk-ci pool (routed via MUK_CI_LABELS,
+# Every job here runs on the self-hosted muk-ci pool (routed via CI_LABELS,
 # like ci.yml). If the runner box is down, runner-watchdog.yml re-routes them
 # to ubuntu-latest — and its own failure email doubles as the "runner is down"
 # alarm, so this canary never falls silent for long.
@@ -91,7 +91,7 @@ env:
 jobs:
   drift:
     name: Migration & function drift
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -184,7 +184,7 @@ jobs:
 
   advisors:
     name: Supabase advisors
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
       - name: What this job is for
@@ -222,7 +222,7 @@ jobs:
   # rather than letting a rename silently retire an assertion.
   db-metrics:
     name: Database metrics
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # Reads SUPABASE_SERVICE_ROLE_KEY.
     # muk#2266: read from the caller's main-only `production-backend`
@@ -270,7 +270,7 @@ jobs:
   # gate rather than a failure. See the script's header.
   quota:
     name: Quota & budget
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # The Vercel token and team id are read from the caller's main-only
     # `Production` environment, so the repo-level copies a PR branch could
@@ -325,7 +325,7 @@ jobs:
   # type-only imports Node ≥ 23.6 strips natively.
   observation-alignment:
     name: Observation alignment (prod vs feature registry)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # Reads SUPABASE_SERVICE_ROLE_KEY.
     # muk#2266: read from the caller's main-only `production-backend`
@@ -364,7 +364,7 @@ jobs:
 
   promo-pipeline:
     name: Promo pipeline (dispatchers, token, refusals)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
     # Reads SUPABASE_SERVICE_ROLE_KEY.
     # muk#2266: read from the caller's main-only `production-backend`
@@ -412,7 +412,7 @@ jobs:
   # but Node's own.
   production-errors:
     name: Production errors (crashes and failed actions)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # Reads SUPABASE_SERVICE_ROLE_KEY.
     # muk#2266: read from the caller's main-only `production-backend`
@@ -458,7 +458,7 @@ jobs:
   # never match; 2 hours old keeps it clear of any run still in flight.
   sweep:
     name: Sweep stranded e2e events
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     # This job WRITES (it deletes rows), so it takes the owner connection
     # string from the caller's main-only `production-backend` environment and
@@ -497,7 +497,7 @@ jobs:
   # within a day (like the drift/advisor alarms) without blocking delivery.
   audit:
     name: Production dependency audit
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       - name: What this job is for
@@ -600,7 +600,7 @@ jobs:
   # stays valid.
   lighthouse:
     name: Lighthouse baseline (mobile, 3 samples)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     # Owns the :3200 port and the single-Lighthouse-at-a-time discipline now
     # that muk-ci.yml's perf job is gone; the `lighthouse` concurrency group
     # still serializes it against any manual workflow_dispatch re-run.
@@ -756,7 +756,7 @@ jobs:
   # and pull-requests: read from the caller's permissions block.
   dora:
     name: DORA metrics (30-day window)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -799,7 +799,7 @@ jobs:
   # always() summary still renders the tables the owner reads.
   efficiency:
     name: Code efficiency (duplication & dead code)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       - name: What this job is for
@@ -861,7 +861,7 @@ jobs:
   # Pure repo analysis: no secrets, no server, no browser.
   consistency:
     name: Code consistency (shared-primitive adoption)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       - name: What this job is for
@@ -928,7 +928,7 @@ jobs:
   # Pure repo analysis: no secrets, no server, no browser.
   copy-quality:
     name: Copy quality (what members actually read)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
       - name: What this job is for
@@ -981,7 +981,7 @@ jobs:
   # browser, and no npm ci (versions come from the lockfile).
   tech-stack:
     name: Tech stack currency (supersession watch)
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     steps:
       - name: What this job is for

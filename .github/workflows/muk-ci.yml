@@ -141,7 +141,7 @@ env:
 
 # Every job runs on the self-hosted muk-ci pool by default — GitHub-hosted
 # minutes were about to breach the plan cap. The labels come from the
-# MUK_CI_LABELS repo variable so CI can be re-routed to ubuntu-latest without
+# CI_LABELS repo variable so CI can be re-routed to ubuntu-latest without
 # a commit: runner-watchdog.yml flips the variable when no muk-ci runner is
 # online (and back), and a human can flip it in Settings → Variables from a
 # phone. The fallback literal keeps the expression working if the variable is
@@ -183,7 +183,7 @@ jobs:
     name: Lint, typecheck, edge functions & build
     # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
     if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 25
     steps:
       - name: What this job is for
@@ -247,7 +247,7 @@ jobs:
     name: Secret scan (gitleaks)
     # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
     if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -316,7 +316,7 @@ jobs:
     name: Dependency audit (lockfile PRs)
     # Not on Dependabot's own run: see "The Dependabot handover" at the top.
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     # Five 90-second attempts against the advisory endpoint, plus checkout.
     timeout-minutes: 12
     steps:
@@ -432,7 +432,7 @@ jobs:
 
   rules:
     name: Project rules
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     steps:
       - name: What this job is for
@@ -572,7 +572,7 @@ jobs:
     name: Prod sync (edge functions)
     # Not on Dependabot's own run: see "The Dependabot handover" at the top.
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -664,7 +664,7 @@ jobs:
     name: Migrations replay (scratch Postgres)
     # Skipped on Dependabot's own run: see "The Dependabot handover" at the top.
     if: ${{ !(github.event_name == 'pull_request' && github.actor == 'dependabot[bot]') }}
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
     env:
       SCRATCH_DB: muk_ci_${{ github.run_id }}_${{ github.run_attempt }}
@@ -685,7 +685,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            # Hosted fallback (runner-watchdog flipped MUK_CI_LABELS): the
+            # Hosted fallback (runner-watchdog flipped CI_LABELS): the
             # ubuntu image ships a stopped PostgreSQL. Its major version may
             # trail prod's 17 — acceptable for a does-it-apply check.
             sudo systemctl start postgresql
@@ -861,7 +861,7 @@ jobs:
     #
     # If the runner watchdog ever fails the pool over to ubuntu-latest, it must
     # move THIS variable too, or e2e queues against labels nothing carries.
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_E2E_LABELS || vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_E2E_LABELS || vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     # 25 minutes of work plus the box-load wait below (up to 600 s).
     timeout-minutes: 35
     # NO concurrency group any more, and that is the point of the lane work.
@@ -1214,7 +1214,7 @@ jobs:
     name: Playwright e2e
     needs: [e2e]
     if: ${{ always() && github.event_name == 'pull_request' }}
-    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ github.actor == 'dependabot[bot]' && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
     steps:
       - name: What this job is for
@@ -1271,7 +1271,7 @@ jobs:
     # on our own hardware instead of a disposable VM — accepted 2026-07-16 to
     # stay under the Actions minutes cap; the box already runs everything else
     # under one user. Revisit when hardening (docs/self-hosted-runners.md).
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     # Staging for main-only deploy secrets (muk.events M13). Today the
     # environment has no secrets, no protection rules and no branch policy,
@@ -1438,7 +1438,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main' && github.event_name == 'push' &&
       vars.VERCEL_DEPLOY_ENABLED == 'true'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 15
     # Staged like deploy-backend's (see there). The "production" Deployment
     # record below names the same environment; GitHub matches names
@@ -1658,7 +1658,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main' && github.event_name == 'push' &&
       vars.VERCEL_DEPLOY_ENABLED == 'true'
-    runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 20
     # Staged like deploy-backend's (see there). `production-backend`, not
     # `Production`: the service-role key and the E2E logins it reads live there
