@@ -224,6 +224,13 @@ jobs:
     name: Database metrics
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
+    # Reads SUPABASE_SERVICE_ROLE_KEY.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
@@ -320,6 +327,13 @@ jobs:
     name: Observation alignment (prod vs feature registry)
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
+    # Reads SUPABASE_SERVICE_ROLE_KEY.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
@@ -352,6 +366,13 @@ jobs:
     name: Promo pipeline (dispatchers, token, refusals)
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 5
+    # Reads SUPABASE_SERVICE_ROLE_KEY.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
@@ -393,6 +414,13 @@ jobs:
     name: Production errors (crashes and failed actions)
     runs-on: ${{ fromJSON(vars.MUK_CI_LABELS || '["self-hosted","muk-ci"]') }}
     timeout-minutes: 10
+    # Reads SUPABASE_SERVICE_ROLE_KEY.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
@@ -576,6 +604,13 @@ jobs:
     # Owns the :3200 port and the single-Lighthouse-at-a-time discipline now
     # that muk-ci.yml's perf job is gone; the `lighthouse` concurrency group
     # still serializes it against any manual workflow_dispatch re-run.
+    # Reads the E2E_ADMIN_*/E2E_STAFF_* logins.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     concurrency:
       group: lighthouse
       cancel-in-progress: false

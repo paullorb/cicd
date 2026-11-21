@@ -62,6 +62,13 @@ jobs:
     # A handful of API calls; a billed minute is the unit, so nothing here may
     # install, check out or wait.
     timeout-minutes: 3
+    # Reads RUNNER_WATCHDOG_TOKEN.
+    # muk#2266: read from the caller's main-only `production-backend`
+    # environment, so the repo-level copy a PR branch could read can go.
+    # `deployment: false`: this job deploys nothing, no record for DORA.
+    environment:
+      name: production-backend
+      deployment: false
     steps:
       - name: What this job is for
         run: |
