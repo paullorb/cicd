@@ -1,0 +1,272 @@
+name: App Supabase deploy
+
+# Ships the caller's supabase/migrations/ and supabase/functions/ to its
+# Supabase project when its default branch moves, so "merged" and "applied"
+# stop being two steps. Generalised from careteam's "Deploy instance #0",
+# whose workflow and scripts/push-migrations-shared.sh this replaces.
+#
+# Switched on per repository, by settings and not by a commit: the job deploys
+# only when the caller passes a project ref (normally its SUPABASE_PROJECT_REF
+# repository variable) and the credential its mode needs. Until then it says
+# so in the run summary and deploys nothing; a missing project is a known
+# state, not a red build.
+#
+# Two modes, because the projects are not all alike:
+#
+# - `shared` (the default): the project holds several repos' migrations in one
+#   ledger (the `paullorber` project: paullorber, careteam, hush,
+#   fuehrerschein). `supabase db push` refuses a ledger with versions it
+#   cannot find in the checkout, and the `migration repair --status reverted`
+#   it suggests would delete the other repos' rows: never run that there. So
+#   this reads the ledger and applies each file it lacks in one transaction
+#   together with its ledger row. Needs SUPABASE_ACCESS_TOKEN.
+# - `push`: the project is the caller's alone, and `supabase db push
+#   --include-all --db-url` owns the ledger. Needs SUPABASE_DB_URL (and
+#   SUPABASE_ACCESS_TOKEN as well when there are edge functions).
+#
+# Not gated on the caller's CI: the "main protection" ruleset already requires
+# it before the merge. Migrations go first and functions second, so a function
+# never runs against a schema it was not written for.
+#
+# Caller:
+#
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ["supabase/**", ".github/workflows/supabase.yml"]
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   jobs:
+#     deploy:
+#       uses: paullorb/cicd/.github/workflows/app-supabase.yml@<SHA>
+#       with:
+#         project_ref: ${{ vars.SUPABASE_PROJECT_REF }}
+#       secrets:
+#         SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      project_ref:
+        description: Supabase project ref. Empty means "no project yet" and nothing is deployed.
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "`shared` (ledger shared with other repos) or `push` (`supabase db push`)."
+        required: false
+        default: shared
+        type: string
+      cli_version:
+        description: Supabase CLI version. Pinned, so a new CLI arrives as a PR here and not during a deploy.
+        required: false
+        default: "3.2.0"
+        type: string
+      deploy_functions:
+        description: Deploy supabase/functions/ after the migrations when the directory has any.
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      SUPABASE_ACCESS_TOKEN:
+        required: false
+      SUPABASE_DB_URL:
+        required: false
+    outputs:
+      deployed:
+        description: "'true' when this run reached the project, 'false' when it was switched off."
+        value: ${{ jobs.deploy.outputs.deployed }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never two deploys of one repo at once, and never cancel one mid-apply: a
+  # half-applied migration is the state with no automatic way back.
+  group: supabase-deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Migrations & edge functions
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) }}
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
+    timeout-minutes: 20
+    outputs:
+      deployed: ${{ steps.gate.outputs.ready }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      PROJECT_REF: ${{ inputs.project_ref }}
+      MODE: ${{ inputs.mode }}
+      DEPLOY_FUNCTIONS: ${{ inputs.deploy_functions }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Is there anything to deploy, and somewhere to deploy it
+        id: gate
+        run: |
+          shopt -s nullglob
+          migrations=(supabase/migrations/*.sql)
+          functions=()
+          if [ "$DEPLOY_FUNCTIONS" = "true" ]; then
+            for dir in supabase/functions/*/; do
+              name=$(basename "$dir")
+              [ "${name#_}" = "$name" ] && functions+=("$name")
+            done
+          fi
+          echo "migrations=${#migrations[@]}" >> "$GITHUB_OUTPUT"
+          echo "functions=${#functions[@]}" >> "$GITHUB_OUTPUT"
+
+          off() {
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "#### Nothing deployed"
+              echo
+              echo "$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::$1"
+            exit 0
+          }
+
+          case "$MODE" in
+            shared|push) ;;
+            *) echo "::error::mode must be 'shared' or 'push', got '$MODE'"; exit 1 ;;
+          esac
+          if [ "${#migrations[@]}" -eq 0 ] && [ "${#functions[@]}" -eq 0 ]; then
+            off "This repository has no supabase/migrations/*.sql and no edge functions."
+          fi
+          if [ -z "$PROJECT_REF" ]; then
+            off "No Supabase project ref was passed (the SUPABASE_PROJECT_REF repository variable is unset), so the automatic deploy is switched off. Set the variable and the secret its mode needs (paullorb/cicd README, \"Supabase deploy\") and this job takes over."
+          fi
+          if ! [[ "$PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]; then
+            echo "::error::project_ref does not look like a Supabase project ref"; exit 1
+          fi
+          if [ "$MODE" = "shared" ] && [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            off "SUPABASE_PROJECT_REF is set but the SUPABASE_ACCESS_TOKEN secret is not, so nothing could be deployed."
+          fi
+          if [ "$MODE" = "push" ] && [ "${#migrations[@]}" -gt 0 ] && [ -z "$SUPABASE_DB_URL" ]; then
+            off "SUPABASE_PROJECT_REF is set but the SUPABASE_DB_URL secret is not, so nothing could be deployed."
+          fi
+          if [ "${#functions[@]}" -gt 0 ] && [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            off "There are edge functions to deploy but the SUPABASE_ACCESS_TOKEN secret is not set, so nothing could be deployed."
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # v1 of the action, pinned to a commit; the CLI itself is the input.
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          version: ${{ inputs.cli_version }}
+
+      # Retries a transient failure instead of going red on the first blip
+      # (careteam, 2026-10-07: the project was briefly unreachable and every
+      # run in that window failed on "Resource has been removed"). Five tries
+      # with doubling backoff from 20s. A genuine failure (bad token, wrong
+      # ref) is not one of the retried classes and fails on the first try.
+      - name: Link
+        if: steps.gate.outputs.ready == 'true' && inputs.mode == 'shared'
+        run: |
+          attempt=1
+          max_attempts=5
+          delay=20
+          while true; do
+            if output=$(supabase link --project-ref "$PROJECT_REF" 2>&1); then
+              echo "$output"
+              break
+            fi
+            echo "$output" >&2
+            if ! grep -qiE 'resource has been removed|no such host|enotfound|eai_again|i/o timeout|connection reset|connection refused|timeout awaiting|: 5[0-9][0-9]([^0-9]|$)' <<<"$output"; then
+              echo "::error::supabase link failed with a non-transient error; not retrying." >&2
+              exit 1
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::supabase link still failing after $attempt attempts on what looked like a transient error; giving up." >&2
+              exit 1
+            fi
+            echo "supabase link: transient-looking failure (attempt $attempt/$max_attempts); retrying in ${delay}s" >&2
+            sleep "$delay"
+            delay=$((delay * 2))
+            attempt=$((attempt + 1))
+          done
+
+      # The ledger is read as `v=<version>;` rows and picked out of whatever
+      # the CLI prints, because its output is not one shape (a runner gets
+      # notices around the rows). An empty answer is a failed read, not an
+      # empty ledger: the shared project always holds other repos' rows, and
+      # treating it as empty would replay every migration from the first.
+      - name: Apply migrations (shared ledger)
+        if: steps.gate.outputs.ready == 'true' && inputs.mode == 'shared' && steps.gate.outputs.migrations != '0'
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+
+          supabase db query --remote --read-only \
+            "select 'v=' || version || ';' as v from supabase_migrations.schema_migrations" 2>/dev/null >"$tmp/ledger.out" || true
+          grep -oE 'v=[0-9]+;' "$tmp/ledger.out" | sed -E 's/^v=//; s/;$//' | sort -u >"$tmp/applied" || true
+          if ! [ -s "$tmp/applied" ]; then
+            echo "::error::could not read the migration ledger" >&2
+            cat "$tmp/ledger.out" >&2
+            exit 1
+          fi
+
+          applied=()
+          for file in supabase/migrations/*.sql; do
+            base=$(basename "$file" .sql)
+            version=${base%%_*}
+            name=${base#*_}
+            # Versions and names come from the repo's own filenames; refuse
+            # anything that could not be written into the SQL below as it is.
+            if ! [[ "$version" =~ ^[0-9]+$ && "$name" =~ ^[a-z0-9_]+$ ]]; then
+              echo "::error::unexpected migration filename: $file" >&2
+              exit 1
+            fi
+            grep -qx "$version" "$tmp/applied" && continue
+            {
+              echo "begin;"
+              cat "$file"
+              echo
+              echo "insert into supabase_migrations.schema_migrations (version, name) values ('$version', '$name');"
+              echo "commit;"
+            } >"$tmp/apply.sql"
+            echo "applying $base"
+            supabase db query --remote --yes -f "$tmp/apply.sql" >/dev/null
+            applied+=("$base")
+          done
+
+          {
+            echo "#### Migrations"
+            echo
+            if [ "${#applied[@]}" -eq 0 ]; then
+              echo "Nothing to apply: the ledger has every migration in this repository."
+            else
+              for base in "${applied[@]}"; do echo "- applied \`$base\`"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --include-all: a migration merged with an older timestamp than the
+      # newest applied one is still applied. --yes: CLI 3 asks before it
+      # changes a hosted project and a runner has no terminal to answer on.
+      - name: Apply migrations (db push)
+        if: steps.gate.outputs.ready == 'true' && inputs.mode == 'push' && steps.gate.outputs.migrations != '0'
+        run: |
+          supabase db push --include-all --yes --db-url "$SUPABASE_DB_URL"
+          {
+            echo "#### Migrations"
+            echo
+            echo "\`supabase db push --include-all\` finished."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy edge functions
+        if: steps.gate.outputs.ready == 'true' && steps.gate.outputs.functions != '0'
+        run: |
+          supabase functions deploy --project-ref "$PROJECT_REF" --yes
+          {
+            echo "#### Edge functions"
+            echo
+            echo "Deployed every function in \`supabase/functions/\`."
+          } >> "$GITHUB_STEP_SUMMARY"

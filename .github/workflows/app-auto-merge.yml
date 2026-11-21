@@ -1,0 +1,135 @@
+name: App auto-merge
+
+# Arms GitHub auto-merge (squash) on a pull request into the caller's default
+# branch, the same way in every repo. The merge itself still waits for the
+# checks the caller's "main protection" ruleset requires, and the repository
+# setting "Automatically delete head branches" removes the branch afterwards.
+#
+# Generalised from paullorber's own auto-merge.yml, which stays the reference
+# for the reasoning. What is decided here, once, for every caller:
+#
+# - Draft PRs are left alone; `ready_for_review` arms them.
+# - A fork's PR is never armed: no review is required on main, so arming it
+#   would land outside code on green CI alone.
+# - Dependabot's PRs are never armed (paullorber#315): what runs after the
+#   merge is not sandboxed. A person reads the bump and arms it by hand.
+# - The merge is armed with the automation app's token, or a PAT, and never
+#   with GITHUB_TOKEN unless the caller asks for it: a merge made under
+#   GITHUB_TOKEN starts no workflow, so main's own CI and any deploy on push
+#   would silently not run. A caller with neither credential gets a notice,
+#   not a failure; paullorber's issue keeper arms its PRs from the Mac.
+#
+# Caller (the events belong to the caller, so this part stays there):
+#
+#   on:
+#     pull_request:
+#       types: [opened, reopened, ready_for_review, edited]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     auto-merge:
+#       uses: paullorb/cicd/.github/workflows/app-auto-merge.yml@<SHA>
+#       secrets:
+#         AUTOMATION_APP_ID: ${{ secrets.AUTOMATION_APP_ID }}
+#         AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+#         AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      github_token_fallback:
+        description: >-
+          Arm with GITHUB_TOKEN when neither the app nor the PAT is available.
+          The merge then starts no workflow on the default branch, so only a
+          repo with nothing to run after a merge should turn this on.
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      AUTOMATION_APP_ID:
+        required: false
+      AUTOMATION_APP_PRIVATE_KEY:
+        required: false
+      AUTO_MERGE_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    name: Enable auto-merge
+    # `edited` re-arms a PR whose base was changed to the default branch;
+    # edits to the title or body are ignored.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && !startsWith(github.event.pull_request.head.ref, 'dependabot/') && (github.event.action != 'edited' || github.event.changes.base) }}
+    # The caller's own runner, or whatever its CI_LABELS says. The `if` above
+    # keeps Dependabot's and forks' PRs out, so there is no hosted fallback
+    # for them as there is in app-ci.yml, and this job checks out no code.
+    runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
+    timeout-minutes: 5
+    env:
+      HAS_APP: ${{ secrets.AUTOMATION_APP_ID != '' && secrets.AUTOMATION_APP_PRIVATE_KEY != '' }}
+    steps:
+      # A failure here (app uninstalled, GitHub down) is not the PR's fault:
+      # the next step falls back to the PAT.
+      - name: Token for the automation app
+        id: app
+        if: env.HAS_APP == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      # Three tries, because the first one can race the PR's own checks: in
+      # the seconds after a PR opens no required check is registered yet, gh
+      # reads the PR as immediately mergeable, tries the merge itself instead
+      # of arming it, and GitHub answers "Pull Request is not mergeable". A
+      # few seconds later the checks are pending and the same command arms
+      # auto-merge. A PR that merged or closed in the meantime needs nothing.
+      - name: Arm auto-merge
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          PAT: ${{ secrets.AUTO_MERGE_TOKEN }}
+          JOB_TOKEN: ${{ github.token }}
+          JOB_TOKEN_ALLOWED: ${{ inputs.github_token_fallback }}
+        run: |
+          if [ -n "$APP_TOKEN" ]; then
+            export GH_TOKEN="$APP_TOKEN"; who="the automation app"
+          elif [ -n "$PAT" ]; then
+            export GH_TOKEN="$PAT"; who="AUTO_MERGE_TOKEN"
+          elif [ "$JOB_TOKEN_ALLOWED" = "true" ]; then
+            export GH_TOKEN="$JOB_TOKEN"; who="GITHUB_TOKEN"
+          else
+            echo "::notice::No automation app or AUTO_MERGE_TOKEN secret in this repository, so nothing was armed here. The issue keeper arms ready pull requests from the Mac."
+            {
+              echo "#### Auto-merge not armed by this run"
+              echo
+              echo "This repository has neither the automation app's secrets (\`AUTOMATION_APP_ID\`, \`AUTOMATION_APP_PRIVATE_KEY\`) nor \`AUTO_MERGE_TOKEN\`. A merge armed with \`GITHUB_TOKEN\` would start no workflow on the default branch, so this run armed nothing."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          state=UNKNOWN
+          for attempt in 1 2 3; do
+            if gh pr merge "$PR_URL" --auto --squash; then
+              echo "Auto-merge (squash) armed with $who." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            state=$(gh pr view "$PR_URL" --json state --jq .state || echo UNKNOWN)
+            if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+              echo "::notice::PR is $state, nothing to arm"
+              exit 0
+            fi
+            if [ "$attempt" != "3" ]; then
+              sleep 15
+            fi
+          done
+          echo "::error::could not arm auto-merge after 3 tries (PR state: $state)"
+          exit 1

@@ -1,0 +1,22 @@
+name: Auto-merge
+
+# Arms auto-merge (squash) on this repository's own pull requests through the
+# reusable app-auto-merge.yml, the same call every other repo makes. The merge
+# still waits for the check the "main protection" ruleset requires.
+on:
+  pull_request:
+    # `edited` re-arms a PR whose base was changed to main; the reusable job
+    # ignores edits to the title or body.
+    types: [opened, reopened, ready_for_review, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    uses: ./.github/workflows/app-auto-merge.yml
+    secrets:
+      AUTOMATION_APP_ID: ${{ secrets.AUTOMATION_APP_ID }}
+      AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+      AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
