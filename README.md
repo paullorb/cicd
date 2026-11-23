@@ -24,6 +24,7 @@ the secrets its workflow requires.
 | `pr-overlap.yml` | any repo | pull requests; comments which other open PRs change the same files |
 | `app-auto-merge.yml` | any repo | pull requests; arms auto-merge (squash) with the automation app's token |
 | `app-supabase.yml` | any repo with `supabase/` | pushes to `main` and manual; applies migrations, then deploys edge functions |
+| `security-gate.yml` | paullorber | `pull_request_target`; the required `Security gate` check on the PR head |
 
 `app-ci.yml` is the generic entry point for a Next.js app (lint, audit, build,
 and migration replay when migrations exist; no secrets). New repos should
@@ -201,6 +202,53 @@ runs `supabase db push --include-all`.
 Before switching it on for a repo whose migrations were applied by hand,
 compare the ledger with the files: a file with no ledger row is applied again
 on the first run.
+
+### Security gate
+
+`security-gate.yml` is the reviewer for pull requests that merge themselves.
+The caller is a `pull_request_target` workflow, so the gate that judges a PR
+is the base branch's copy, not one the PR can edit; the job checks the PR
+head out as data and never installs, builds or runs anything from it. It
+reports a check run named `Security gate` on the PR **head** SHA through the
+Checks API (the job's own check run sits on the base commit and cannot
+satisfy a required check) and one sticky PR comment.
+
+- **Deterministic rules** (`scripts/security-gate.mjs`, tested by
+  `scripts/security-gate.test.mjs` in the self-check), on the lines the PR
+  adds; every finding blocks:
+  - migrations: a table grant to `anon`, `authenticated` or `public`;
+    `security definer` without `set search_path`; `disable row level
+    security`; a policy `using (true)` / `with check (true)` for anyone but
+    `service_role`;
+  - workflows: `pull_request_target`, `permissions: write-all`, a `uses:` not
+    pinned to a 40-hex SHA, `curl | sh`, and the forgery guard (`checks:` or
+    `statuses: write`, the Checks/status API, the words "Security gate"). A
+    PR tripping the forgery guard is also turned into a draft, so a forged
+    green check cannot merge it. The caller file itself may change only by
+    moving its pinned SHA;
+  - a `"use server"` file whose exported async function never calls the
+    `server-action-guard` regex (`getOwner()` by default). A deliberate
+    public action takes `// security-gate: public-action <why>` above it and
+    is reported, not blocked. Any `"use server"` file counts as sensitive;
+  - gitleaks (pinned binary) over the PR's own commits with the job's config,
+    so a PR cannot add a `.gitleaks.toml` or `.gitleaksignore`; a false
+    positive takes an inline `gitleaks:allow` comment;
+  - a new `package-lock.json` entry with `hasInstallScript`.
+- **AI review**, only when a file matches the caller's `sensitive-paths`:
+  Claude Code (`claude-code-version`, `model`) in `--restricted` mode with
+  Read, Grep and Glob only, `dontAsk`, a throwaway `HOME`, no MCP and deny
+  rules outside its working directory, which is a copy of the head with no
+  `.git` and no symlinks under `/tmp`. The prompt marks the PR as untrusted
+  and demands strict JSON; only `high` findings block. A missing
+  `CLAUDE_CODE_OAUTH_TOKEN`, a failure or a timeout (`ai-timeout-seconds`,
+  480) passes with "AI review skipped: …" unless a deterministic rule fired.
+- **Required check**: add exactly `Security gate` to the repo's ruleset with
+  `integration_id` 15368 (GitHub Actions), so a commit status or another
+  app's check of that name does not count. Verify it reported on a real PR
+  head first: a required check that never reports stops every merge.
+- **Changing the caller** beyond its SHA (permissions, triggers, inputs) is
+  blocked by design. The owner does it by hand: remove `Security gate` from
+  the ruleset, merge, put it back.
 
 ## Adding a repository
 

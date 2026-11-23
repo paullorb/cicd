@@ -115,3 +115,8 @@ jobs:
 
       - name: Workflows follow the house rules
         run: node scripts/check-workflows.mjs
+
+      # The Security gate's rules decide what may merge in the repos that call
+      # security-gate.yml; a regression there is a hole in every one of them.
+      - name: Script unit tests
+        run: node --test "scripts/*.test.mjs"
