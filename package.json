@@ -11,7 +11,7 @@
     "lint": "oxlint --deny-warnings --report-unused-disable-directives"
   },
   "devDependencies": {
-    "js-yaml": "5.4.1",
-    "oxlint": "^1.87.0"
+    "js-yaml": "5.5.0",
+    "oxlint": "^1.94.0"
   }
 }
