@@ -22,10 +22,12 @@ name: Security gate
 #      the check passes with "AI review skipped: <why>".
 #
 # The result is a check run named `check-name` created through the Checks API
-# on the PR HEAD sha. The job's own check run belongs to the base commit a
-# pull_request_target run is attached to, so it cannot satisfy a required
-# check on the PR; the explicit one can. One sticky comment carries the
-# findings.
+# on the PR HEAD sha. Measured on paullorber#475 (2026-11-23): the job's own
+# check run ("<caller job> / review") also lands on the head SHA, but its name
+# is the caller's to choose and it goes green whenever the job exits 0. The
+# explicit run carries the exact name, the verdict and the annotations, and
+# does not depend on GitHub keeping that attachment. One sticky comment
+# carries the findings.
 #
 # Caller (paullorber's .github/workflows/security.yml):
 #
