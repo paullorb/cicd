@@ -7,7 +7,12 @@ import { test } from "node:test";
 
 import {
   buildPrompt,
+  chatCompletionsUrl,
+  codexConfig,
+  collectExcerpts,
   decide,
+  detectAuthorFamilies,
+  familyOfModel,
   exportedServerActions,
   gitleaksFindings,
   installScriptFindings,
@@ -15,11 +20,14 @@ import {
   parseAiVerdict,
   parsePatterns,
   parseUnifiedDiff,
+  redact,
   renderReport,
   scanRepository,
+  selectReviewers,
   serverActionFindings,
   splitSql,
   sqlFindings,
+  VERDICT_SCHEMA,
   workflowFindings,
 } from "./security-gate.mjs";
 
@@ -290,42 +298,183 @@ test("the AI verdict is accepted only as strict JSON", () => {
 });
 
 test("the prompt fences the diff with a nonce and calls the PR untrusted", () => {
-  const prompt = buildPrompt({ repo: "o/r", prNumber: 1, threatModel: "TM", files: [{ path: "a", status: "M", sensitive: true }], findings: [], diff: "+x", nonce: "n1" });
+  const prompt = buildPrompt({ repo: "o/r", prNumber: 1, threatModel: "TM", files: [{ path: "a", status: "M", sensitive: true }], findings: [], diff: "+x {{THREAT_MODEL}}", nonce: "n1" });
   assert.match(prompt, /UNTRUSTED/);
-  assert.match(prompt, /DIFF-n1-BEGIN\n\+x\nDIFF-n1-END/);
+  assert.match(prompt, /DIFF-n1-BEGIN\n\+x \{\{THREAT_MODEL\}\}\nDIFF-n1-END/, "text from the PR is never expanded");
   assert.match(prompt, /TM/);
+  assert.match(prompt, /read-only tools/);
+  assert.equal(prompt.replace(/DIFF-n1-BEGIN[\s\S]*DIFF-n1-END/, "").match(/\{\{[A-Z_]+\}\}/), null, "every placeholder is filled");
+  assert.doesNotMatch(prompt, /Claude|Codex|Read, Grep/, "the prompt names no harness");
 });
 
-test("decide: block on high only, AI trouble never blocks, a missing scan fails closed", () => {
-  const scan = { files: [{ path: "a", sensitive: false }], findings: [], sensitive: false };
+test("the verdict schema asks for exactly what parseAiVerdict accepts", () => {
+  assert.deepEqual(VERDICT_SCHEMA.required, ["verdict", "findings"]);
+  assert.deepEqual(VERDICT_SCHEMA.properties.findings.items.properties.severity.enum, ["high", "medium", "low"]);
+});
+
+test("the Codex sandbox reads the review copy and the system minimum only", () => {
+  const config = codexConfig("/tmp/security-gate-review.abc");
+  for (const line of ['":minimal" = "read"', '"/Users" = "deny"', '"/home" = "deny"', '"/tmp" = "deny"', '"/private/tmp" = "deny"', '"/tmp/security-gate-review.abc" = "read"', 'web_search = "disabled"', "project_doc_max_bytes = 0", 'approval_policy = "never"', 'inherit = "core"']) {
+    assert.ok(config.includes(line), line);
+  }
+  assert.doesNotMatch(config, /mcp_servers|"write"|danger/);
+});
+
+const reviewer = (id, family, extra = {}) => ({ id, harness: id, family, model: `${id}-model`, status: "ran", verdict: "pass", findings: [], seconds: 3, ...extra });
+const HIGH = { rule: "ai-review", severity: "high", blocking: true, file: "a.ts", line: 1, summary: "h" };
+const MEDIUM = { rule: "ai-review", severity: "medium", blocking: false, file: "a.ts", line: 2, summary: "m" };
+
+test("decide: block on any high, AI trouble never blocks, a missing scan fails closed", () => {
+  const scan = { files: [{ path: "a", sensitive: false }], findings: [], sensitive: false, authorFamilies: [] };
   assert.equal(decide({ scan, ai: null }).conclusion, "success");
   assert.match(decide({ scan, ai: null }).title, /No sensitive paths/);
 
   const sensitive = { ...scan, sensitive: true };
-  const skipped = decide({ scan: sensitive, ai: { status: "skipped", reason: "no token" } });
-  assert.equal(skipped.conclusion, "success");
-  assert.match(skipped.warnings[0], /AI review skipped: no token/);
+  const none = decide({ scan: sensitive, ai: { reviewers: [{ id: "claude", status: "unconfigured", missing: ["CLAUDE_CODE_OAUTH_TOKEN"] }] } });
+  assert.equal(none.conclusion, "success");
+  assert.match(none.warnings[0], /AI review skipped: no reviewer is configured/);
+  assert.match(none.title, /AI review skipped/);
 
-  const medium = decide({ scan: sensitive, ai: { status: "ran", verdict: "block", findings: [{ severity: "medium", blocking: false, summary: "m" }] } });
+  const allDown = decide({ scan: sensitive, ai: { reviewers: [reviewer("claude", "anthropic", { status: "unavailable", reason: "timeout" }), reviewer("codex", "openai", { status: "unavailable", reason: "401" })] } });
+  assert.equal(allDown.conclusion, "success");
+  assert.match(allDown.warnings[0], /AI review skipped: every configured reviewer was unavailable \(claude \(claude-model\): timeout; codex \(codex-model\): 401\)/);
+
+  const medium = decide({ scan: sensitive, ai: { reviewers: [reviewer("claude", "anthropic", { verdict: "block", findings: [MEDIUM] })] } });
   assert.equal(medium.conclusion, "success");
-  assert.equal(medium.warnings.length, 1);
+  assert.match(medium.warnings[0], /answered "block" without a high-severity finding/);
+  assert.match(medium.title, /reviewed by 1 AI reviewer — passed/);
 
-  const high = decide({ scan: sensitive, ai: { status: "ran", verdict: "block", findings: [{ severity: "high", blocking: true, summary: "h" }] } });
-  assert.equal(high.conclusion, "failure");
+  // One dissenting reviewer is enough: prompt injection has to fool them all.
+  const oneHigh = decide({ scan: sensitive, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai", { verdict: "block", findings: [HIGH] })] } });
+  assert.equal(oneHigh.conclusion, "failure");
+  assert.equal(oneHigh.findings[0].rule, "ai · codex");
 
-  const deterministic = decide({ scan: { ...sensitive, findings: [{ blocking: true, severity: "high", summary: "x" }] }, ai: { status: "skipped", reason: "r" } });
+  const deterministic = decide({ scan: { ...sensitive, findings: [{ blocking: true, severity: "high", summary: "x" }] }, ai: { reviewers: [] } });
   assert.equal(deterministic.conclusion, "failure");
 
   assert.equal(decide({ scan: null, ai: null, jobStatus: "failure" }).conclusion, "failure");
   assert.equal(decide({ scan: null, ai: null, jobStatus: "cancelled" }).conclusion, "cancelled");
 });
 
-test("renderReport starts with the sticky marker", () => {
+test("cross-review: a model family never alone judges its own PR when another is configured", () => {
+  const claudePr = { files: [{ path: "a", sensitive: true }], findings: [], sensitive: true, authorFamilies: [{ family: "anthropic", evidence: "Claude in commit abc1234" }] };
+  // Another family answered: pass.
+  assert.equal(decide({ scan: claudePr, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai")] } }).conclusion, "success");
+  // Another family is configured but did not answer while the author's own did: blocked.
+  const own = decide({ scan: claudePr, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai", { status: "unavailable", reason: "timeout" })] } });
+  assert.equal(own.conclusion, "failure");
+  assert.equal(own.findings[0].rule, "cross-review-missing");
+  // Only the author's family is configured: pass with a visible note.
+  const same = decide({ scan: claudePr, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai", { status: "unconfigured", missing: ["CODEX_API_KEY"] })] } });
+  assert.equal(same.conclusion, "success");
+  assert.match(same.warnings.join("\n"), /Cross-review: .* reviewed by its own family only/);
+  // Every reviewer unavailable: the deterministic layer decides, as before.
+  const down = decide({ scan: claudePr, ai: { reviewers: [reviewer("claude", "anthropic", { status: "unavailable", reason: "x" }), reviewer("codex", "openai", { status: "unavailable", reason: "y" })] } });
+  assert.equal(down.conclusion, "success");
+  assert.match(down.warnings[0], /AI review skipped/);
+  // No harness detected (a human PR): any reviewer will do.
+  assert.equal(decide({ scan: { ...claudePr, authorFamilies: [] }, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai", { status: "unavailable", reason: "x" })] } }).conclusion, "success");
+  // Written with both families: a third family is needed only if configured.
+  const both = { ...claudePr, authorFamilies: [{ family: "anthropic", evidence: "a" }, { family: "openai", evidence: "b" }] };
+  assert.equal(decide({ scan: both, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("codex", "openai")] } }).conclusion, "success");
+  assert.equal(decide({ scan: both, ai: { reviewers: [reviewer("claude", "anthropic"), reviewer("openai-compatible", "google", { status: "unavailable", reason: "x" })] } }).conclusion, "failure");
+});
+
+test("the author's harness comes from trailers, identities and the branch", () => {
+  const commit = (message, extra = {}) => ({ sha: "0123456789", authorName: "Paul", authorEmail: "p@example.com", committerName: "Paul", committerEmail: "p@example.com", message, ...extra });
+  const families = (commits, headRef) => detectAuthorFamilies({ commits, headRef }).map((a) => a.family).sort();
+  assert.deepEqual(families([commit("fix\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n")]), ["anthropic"]);
+  assert.deepEqual(families([commit("fix\n\nCo-authored-by: Claude Fable 5.2 <noreply@anthropic.com>")]), ["anthropic"]);
+  assert.deepEqual(families([commit("fix\n\nCo-authored-by: Codex <noreply@openai.com>")]), ["openai"]);
+  assert.deepEqual(families([commit("fix", { authorName: "chatgpt-codex-connector[bot]", authorEmail: "x@users.noreply.github.com" })]), ["openai"]);
+  assert.deepEqual(families([commit("fix\n\nCo-authored-by: gemini-code-assist[bot] <x@users.noreply.github.com>")]), ["google"]);
+  assert.deepEqual(families([commit("a\n\nCo-Authored-By: Claude <noreply@anthropic.com>"), commit("b\n\nCo-authored-by: Codex <noreply@openai.com>")]), ["anthropic", "openai"]);
+  assert.deepEqual(families([commit("plain human commit")]), []);
+  assert.deepEqual(families([commit("mentions claude in prose and Co-authored-by: Paul")]), [], "only a trailer line counts, not prose");
+  assert.deepEqual(families([commit("x")], "claude/fix-login"), ["anthropic"]);
+  assert.deepEqual(families([commit("x")], "codex/fix-login"), ["openai"]);
+  assert.match(detectAuthorFamilies({ commits: [commit("x\n\nCo-authored-by: Codex <noreply@openai.com>")] })[0].evidence, /Codex in commit 0123456/);
+});
+
+test("reviewers are enabled by their credentials and ordered by SECURITY_REVIEWERS", () => {
+  const ids = (env) => selectReviewers(env).reviewers.map((r) => `${r.id}:${r.configured ? "on" : "off"}`);
+  assert.deepEqual(ids({}), ["claude:off", "codex:off", "openai-compatible:off"]);
+  assert.deepEqual(ids({ CODEX_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t" }), ["claude:on", "codex:on", "openai-compatible:off"]);
+  assert.deepEqual(ids({ SECURITY_REVIEWERS: "codex, claude", CODEX_API_KEY: "k" }), ["codex:on", "claude:off"]);
+  assert.deepEqual(ids({ REVIEW_API_KEY: "k", REVIEW_API_BASE: "https://x" }), ["claude:off", "codex:off", "openai-compatible:off"], "the API reviewer also needs its model");
+  const api = selectReviewers({ REVIEW_API_KEY: "k", REVIEW_API_BASE: "https://x", REVIEW_API_MODEL: "gemini-3-pro" }).reviewers[2];
+  assert.equal(api.configured, true);
+  assert.equal(api.family, "google");
+  assert.deepEqual(selectReviewers({}).reviewers[2].missing, ["REVIEW_API_KEY", "REVIEW_API_BASE", "REVIEW_API_MODEL"]);
+  const odd = selectReviewers({ SECURITY_REVIEWERS: "gemini,codex" });
+  assert.deepEqual(odd.unknown, ["gemini"]);
+  assert.match(decide({ scan: { files: [], findings: [], sensitive: true }, ai: { reviewers: odd.reviewers.map((r) => ({ ...r, status: "unconfigured" })), unknown: odd.unknown } }).warnings[0], /names `gemini`, which this gate does not know/);
+});
+
+test("model families", () => {
+  assert.equal(familyOfModel("claude-opus-5-5"), "anthropic");
+  assert.equal(familyOfModel("gpt-6.2-sol"), "openai");
+  assert.equal(familyOfModel("openai/o4-mini"), "openai");
+  assert.equal(familyOfModel("gemini-3-pro"), "google");
+  assert.equal(familyOfModel("models/gemini-2.5-flash"), "google");
+  assert.equal(familyOfModel("meta-llama/llama-4"), "meta");
+  assert.equal(familyOfModel("qwen3-coder"), "alibaba");
+  assert.equal(familyOfModel("something-new"), "other");
+});
+
+test("the API reviewer only talks https (or http to loopback)", () => {
+  assert.equal(chatCompletionsUrl("https://generativelanguage.googleapis.com/v1beta/openai/"), "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions");
+  assert.equal(chatCompletionsUrl("http://localhost:11434/v1"), "http://localhost:11434/v1/chat/completions");
+  assert.equal(chatCompletionsUrl("http://example.com/v1"), null);
+  assert.equal(chatCompletionsUrl("https://user:pw@example.com/v1"), null);
+  assert.equal(chatCompletionsUrl("file:///etc/passwd"), null);
+  assert.equal(chatCompletionsUrl(""), null);
+});
+
+test("excerpts are bounded and skip deleted and binary files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "security-gate-excerpts-"));
+  writeFileSync(join(dir, "big.ts"), "x".repeat(50));
+  writeFileSync(join(dir, "auth.ts"), "secret check");
+  writeFileSync(join(dir, "bin.png"), "a\0b");
+  const out = collectExcerpts(dir, [
+    { path: "big.ts", status: "M", sensitive: false },
+    { path: "auth.ts", status: "M", sensitive: true },
+    { path: "gone.ts", status: "D", sensitive: true },
+    { path: "bin.png", status: "A", sensitive: true },
+  ], { perFile: 20, total: 30 });
+  assert.deepEqual(out.map((e) => [e.path, e.text.length, e.truncated]), [["auth.ts", 12, false], ["big.ts", 18, true]]);
+  const prompt = buildPrompt({ repo: "o/r", prNumber: 1, threatModel: "", files: [], findings: [], diff: "+x", nonce: "n2", excerpts: out });
+  assert.match(prompt, /You have no tools/);
+  assert.match(prompt, /EXCERPTS-n2-BEGIN\n===== auth.ts\nsecret check/);
+});
+
+test("credentials never reach the report", () => {
+  const value = redact({ reviewers: [{ reason: "bad key sk-0123456789abcdef", findings: [{ summary: "echoed sk-0123456789abcdef" }] }] }, ["sk-0123456789abcdef", undefined, "short"]);
+  assert.doesNotMatch(JSON.stringify(value), /sk-0123/);
+  assert.match(value.reviewers[0].reason, /\[redacted\]/);
+});
+
+test("renderReport names each reviewer, its model, verdict and findings", () => {
   const scan = { files: [{ path: "a", sensitive: false }], findings: [], sensitive: false };
   const body = renderReport({ decision: decide({ scan, ai: null }), scan, ai: null, headSha: "0123456789", runUrl: "" });
   assert.ok(body.startsWith("<!-- security-gate:sticky -->"));
   assert.match(body, /No sensitive paths — deterministic checks passed/);
   assert.match(body, /`0123456`/);
+
+  const sensitive = { files: [{ path: "a", sensitive: true }], findings: [], sensitive: true, authorFamilies: [{ family: "anthropic", evidence: "x" }] };
+  const ai = {
+    reviewers: [
+      reviewer("codex", "openai", { harness: "Codex", version: "0.169.0", model: "gpt-6.2-sol", verdict: "block", findings: [HIGH] }),
+      reviewer("claude", "anthropic", { harness: "Claude Code", status: "unavailable", reason: "did not finish within 480s" }),
+      { id: "openai-compatible", harness: "OpenAI-compatible API", family: "other", status: "unconfigured", missing: ["REVIEW_API_KEY", "REVIEW_API_BASE", "REVIEW_API_MODEL"] },
+    ],
+  };
+  const report = renderReport({ decision: decide({ scan: sensitive, ai }), scan: sensitive, ai, headSha: "0123456789", runUrl: "" });
+  assert.match(report, /\| Codex 0\.169\.0 \| `gpt-6\.2-sol` \| OpenAI \(GPT\/Codex\) \| 🛑 block, 1 finding \| 3s \|/);
+  assert.match(report, /\| Claude Code \| `claude-model` \| Anthropic \(Claude\) \| unavailable: did not finish within 480s \|/);
+  assert.match(report, /Not configured: openai-compatible \(REVIEW_API_KEY \+ REVIEW_API_BASE \+ REVIEW_API_MODEL\)/);
+  assert.match(report, /<sub>ai · codex<\/sub>/);
+  assert.match(report, /written with Anthropic \(Claude\)/);
 });
 
 test("scanRepository end to end on a scratch repository", () => {
@@ -355,10 +504,12 @@ test("scanRepository end to end on a scratch repository", () => {
   write("supabase/migrations/2.sql", "grant select on t to anon;\n");
   write("lib/work/actions.ts", '"use server";\nexport async function x() {\n  return 1;\n}\n');
   run("add", ".");
-  run("commit", "-qm", "risky");
+  run("commit", "-qm", "risky\n\nCo-authored-by: Codex <noreply@openai.com>");
   const head = run("rev-parse", "HEAD");
   const loud = scanRepository({ repoDir: dir, baseSha: base, headSha: head, patterns: PAULLORBER, guardPattern: "getOwner", gateCaller: "", gitleaksReport: "[]" });
   assert.equal(loud.sensitive, true);
   assert.deepEqual(rules(loud.findings).sort(), ["server-action-no-owner", "sql-grant-open-role"]);
   assert.equal(loud.files.find((f) => f.path === "lib/work/actions.ts").sensitive, true, "a use-server file is sensitive wherever it lives");
+  assert.deepEqual(quiet.authorFamilies, []);
+  assert.deepEqual(loud.authorFamilies.map((a) => a.family), ["openai"], "the trailer of a PR commit names the author's harness");
 });
