@@ -210,8 +210,10 @@ The caller is a `pull_request_target` workflow, so the gate that judges a PR
 is the base branch's copy, not one the PR can edit; the job checks the PR
 head out as data and never installs, builds or runs anything from it. It
 reports a check run named `Security gate` on the PR **head** SHA through the
-Checks API (the job's own check run sits on the base commit and cannot
-satisfy a required check) and one sticky PR comment.
+Checks API and one sticky PR comment. (The job's own `<caller job> /
+review` check also lands on the head SHA, as measured on paullorber#475, but
+require the explicit `Security gate`: its name is fixed and it carries the
+verdict.)
 
 - **Deterministic rules** (`scripts/security-gate.mjs`, tested by
   `scripts/security-gate.test.mjs` in the self-check), on the lines the PR
