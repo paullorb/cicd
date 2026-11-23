@@ -236,14 +236,47 @@ verdict.)
     so a PR cannot add a `.gitleaks.toml` or `.gitleaksignore`; a false
     positive takes an inline `gitleaks:allow` comment;
   - a new `package-lock.json` entry with `hasInstallScript`.
-- **AI review**, only when a file matches the caller's `sensitive-paths`:
-  Claude Code (`claude-code-version`, `model`) in `--restricted` mode with
-  Read, Grep and Glob only, `dontAsk`, a throwaway `HOME`, no MCP and deny
-  rules outside its working directory, which is a copy of the head with no
-  `.git` and no symlinks under `/tmp`. The prompt marks the PR as untrusted
-  and demands strict JSON; only `high` findings block. A missing
-  `CLAUDE_CODE_OAUTH_TOKEN`, a failure or a timeout (`ai-timeout-seconds`,
-  480) passes with "AI review skipped: …" unless a deterministic rule fired.
+- **AI review**, only when a file matches the caller's `sensitive-paths`
+  (or is a `"use server"` file), by a team of reviewers rather than one
+  vendor. Every reviewer gets the same contract: the diff, the sensitive file
+  list and the caller's `threat-model` in one provider-neutral prompt
+  (`scripts/security-gate-prompt.md`), a copy of the head under `/tmp` with
+  no `.git`, no symlinks and none of the PR's agent configuration
+  (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.claude/`, `.codex/`, `.gemini/`,
+  `.mcp.json`, ... — they still reach the reviewers as diff), and
+  `ai-timeout-seconds` (480). It must answer exactly
+  `{"verdict":"pass"|"block","findings":[{"severity","file","line","summary"}]}`;
+  anything else, an error or a timeout makes that reviewer "unavailable",
+  never a pass. The reviewers run in parallel; each is enabled only by its
+  own credential:
+
+  | Reviewer | Enabled by | Runs as |
+  |---|---|---|
+  | `claude` | secret `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`); model `claude-model`, or the `CLAUDE_MODEL` variable | Claude Code `claude-code-version` in `--restricted` print mode: Read, Grep and Glob only, `dontAsk`, a throwaway `HOME`, `--strict-mcp-config`, deny rules outside its working directory |
+  | `codex` | secret `CODEX_API_KEY` (an OpenAI API key; `codex exec` reads it from that variable); model: the `CODEX_MODEL` variable, else Codex's default | `codex exec` `codex-version` with a throwaway `CODEX_HOME` whose `config.toml` is the only config: a permission profile that reads the system minimum and the review copy only (home folders and temp directories denied, no writes, no network), `approval_policy = "never"`, AGENTS.md not loaded, web search, apps, plugins, hooks, memories and sub-agents off, `--ignore-rules --ephemeral`, and `--output-schema` for the verdict |
+  | `openai-compatible` | secret `REVIEW_API_KEY` plus the variables `REVIEW_API_BASE` (e.g. `https://generativelanguage.googleapis.com/v1beta/openai`; plain `http` only to localhost) and `REVIEW_API_MODEL` | one `POST {base}/chat/completions` from the gate script, no tools: the diff plus excerpts of the changed head files (sensitive first, 24k characters each, 120k in all) |
+
+  The repository variable `SECURITY_REVIEWERS` (e.g. `codex,claude`)
+  limits and orders them; unset, every enabled one runs. The team policy:
+  - **any** reviewer's `high` finding blocks; medium and low are reported.
+    Prompt injection has to fool every model to get through;
+  - **cross-review**: the PR's author harness is read from its commits
+    (`Co-Authored-By: Claude …` or `@anthropic.com`, `Co-authored-by: Codex
+    <noreply@openai.com>` or the Codex bot, Gemini's trailer or bot) and a
+    `claude/`, `codex/` or `gemini/` branch prefix. When a reviewer of
+    another model family is configured, at least one of them must answer, or
+    the gate blocks ("cross-review-missing", re-run it); with only the
+    author's family configured it passes with a visible note;
+  - no reviewer configured, or every one unavailable: the deterministic
+    layer decides and the comment says "AI review skipped: …".
+
+  The sticky comment lists each reviewer with its harness, version, model,
+  family, verdict and time, and tags each AI finding with the reviewer that
+  raised it. Credential values are scrubbed from everything a reviewer
+  returns before it is posted. Secrets reach a reusable workflow only when
+  the caller passes them (`secrets:` in its `uses:` job); repository
+  variables are the caller's own, as with `CI_LABELS`, and need no caller
+  change.
 - **Required check**: add exactly `Security gate` to the repo's ruleset with
   `integration_id` 15368 (GitHub Actions), so a commit status or another
   app's check of that name does not count. Verify it reported on a real PR

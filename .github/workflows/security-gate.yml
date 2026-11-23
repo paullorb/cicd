@@ -8,18 +8,24 @@ name: Security gate
 # pull_request_target is a privileged job next to untrusted content, so this
 # job checks the PR head out as DATA only. It never installs, builds, tests or
 # runs anything from it: `git diff`/`git show` read it, gitleaks scans its
-# commits with a config this job writes, and Claude Code reads a copy of it
-# with Read/Grep/Glob only.
+# commits with a config this job writes, and the AI reviewers read a copy of
+# it with read-only tools (or get excerpts of it, with no tools at all).
 #
 # Layers:
 #   1. Deterministic rules (scripts/security-gate.mjs, unit-tested by
 #      self-check.yml): migrations, workflows, server actions, secrets,
 #      install scripts. Any finding blocks. Seconds.
 #   2. AI review, only when a changed file is on the caller's sensitive list
-#      (or is a "use server" file): Claude Code headless with the caller's
-#      CLAUDE_CODE_OAUTH_TOKEN. High severity blocks; medium and low are
-#      reported. No token, a failure or a timeout never blocks on its own:
-#      the check passes with "AI review skipped: <why>".
+#      (or is a "use server" file): a team of reviewers, each enabled by its
+#      own credential and run in parallel under the same contract (README,
+#      "Security gate"): Claude Code (CLAUDE_CODE_OAUTH_TOKEN), Codex
+#      (CODEX_API_KEY) and any OpenAI-compatible endpoint (REVIEW_API_KEY with
+#      the REVIEW_API_BASE and REVIEW_API_MODEL variables). The variable
+#      SECURITY_REVIEWERS (e.g. `codex,claude`) limits and orders them. A high
+#      finding from any reviewer blocks; a PR written with one model family
+#      needs an answer from another family when one is configured. No
+#      reviewer, or every one unavailable, never blocks on its own: the check
+#      passes with "AI review skipped: <why>".
 #
 # The result is a check run named `check-name` created through the Checks API
 # on the PR HEAD sha. Measured on paullorber#475 (2026-11-23): the job's own
@@ -47,6 +53,11 @@ name: Security gate
 #           ...
 #       secrets:
 #         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#         CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+#         REVIEW_API_KEY: ${{ secrets.REVIEW_API_KEY }}
+#
+# A secret reaches this workflow only when the caller passes it; repository
+# variables (vars.*) are the caller's own and need no caller change.
 
 on:
   workflow_call:
@@ -75,19 +86,31 @@ on:
         description: The name of the check run on the PR head; make exactly this a required status check.
         type: string
         default: Security gate
-      model:
+      claude-model:
+        description: The Claude reviewer's model; the CLAUDE_MODEL repository variable overrides it.
         type: string
         default: claude-opus-5-5
       claude-code-version:
-        description: Exact @anthropic-ai/claude-code version for the AI review.
+        description: Exact @anthropic-ai/claude-code version for the Claude reviewer.
         type: string
         default: 2.1.323
+      codex-version:
+        description: Exact @openai/codex version for the Codex reviewer. Its model is the CODEX_MODEL repository variable, or Codex's default.
+        type: string
+        default: 0.169.0
       ai-timeout-seconds:
+        description: Each reviewer's budget; they run in parallel.
         type: number
         default: 480
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
-        description: From `claude setup-token`. Without it the AI layer is skipped with a warning.
+        description: Enables the Claude Code reviewer. From `claude setup-token`.
+        required: false
+      CODEX_API_KEY:
+        description: Enables the Codex reviewer. An OpenAI API key; `codex exec` reads it from CODEX_API_KEY.
+        required: false
+      REVIEW_API_KEY:
+        description: Enables the OpenAI-compatible reviewer, with the REVIEW_API_BASE and REVIEW_API_MODEL repository variables.
         required: false
 
 jobs:
@@ -106,6 +129,7 @@ jobs:
       GATE: ${{ github.workspace }}/.security-gate-cicd/scripts/security-gate.mjs
       CHECK_NAME: ${{ inputs.check-name }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_NODE_ID: ${{ github.event.pull_request.node_id }}
@@ -116,7 +140,7 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
           #### Security gate
 
-          Reviews a pull request from the base branch's own definition before it can auto-merge: deterministic rules on migrations, workflows, server actions, secrets and install scripts, then a read-only Claude Code review when sensitive paths changed. The verdict is the `Security gate` check on the PR head and one sticky PR comment.
+          Reviews a pull request from the base branch's own definition before it can auto-merge: deterministic rules on migrations, workflows, server actions, secrets and install scripts, then read-only AI reviews by every configured reviewer (Claude Code, Codex, any OpenAI-compatible model) when sensitive paths changed. The verdict is the `Security gate` check on the PR head and one sticky PR comment.
 
           ❌ Read the PR comment: each 🛑 row names the file, line and why. Fix the code and push; for a gitleaks false positive add a `gitleaks:allow` comment on that line. Do not edit the gate's caller to get past it: that change is itself blocked.
           TLDR
@@ -213,9 +237,11 @@ jobs:
           GATE_CALLER: ${{ inputs.gate-caller }}
         run: node "$GATE" scan
 
-      # A copy outside $HOME with no .git and no symlinks, so the reviewer's
-      # Read(./**) cannot follow a planted link out of the tree and the deny
-      # rules on ~ do not cover its own working directory.
+      # A copy outside $HOME with no .git, no symlinks and none of the PR's
+      # agent configuration, so a reviewer cannot follow a planted link out of
+      # the tree, the deny rules on ~ do not cover its own working directory,
+      # and the PR cannot hand a reviewer its own instructions, settings,
+      # hooks or MCP servers. Those files still reach every reviewer as diff.
       - name: AI review (sensitive paths only)
         if: ${{ steps.scan.outputs.sensitive == 'true' }}
         continue-on-error: true
@@ -223,8 +249,16 @@ jobs:
         shell: bash
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          MODEL: ${{ inputs.model }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          REVIEW_API_KEY: ${{ secrets.REVIEW_API_KEY }}
+          REVIEW_API_BASE: ${{ vars.REVIEW_API_BASE }}
+          REVIEW_API_MODEL: ${{ vars.REVIEW_API_MODEL }}
+          SECURITY_REVIEWERS: ${{ vars.SECURITY_REVIEWERS }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CLAUDE_MODEL_DEFAULT: ${{ inputs.claude-model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+          CODEX_VERSION: ${{ inputs.codex-version }}
           AI_TIMEOUT_SECONDS: ${{ inputs.ai-timeout-seconds }}
           THREAT_MODEL: ${{ inputs.threat-model }}
         run: |
@@ -235,6 +269,8 @@ jobs:
           cp -R .security-gate-head/. "$REVIEW_DIR/"
           rm -rf "$REVIEW_DIR/.git"
           find "$REVIEW_DIR" -type l -delete
+          find "$REVIEW_DIR" \( -name .claude -o -name .codex -o -name .gemini -o -name .cursor -o -name .agents -o -name .continue \) -prune -exec rm -rf {} +
+          find "$REVIEW_DIR" -type f \( -name 'CLAUDE.md' -o -name 'CLAUDE.local.md' -o -name 'AGENTS.md' -o -name 'AGENTS.override.md' -o -name 'GEMINI.md' -o -name '.mcp.json' -o -name '.cursorrules' -o -name 'copilot-instructions.md' \) -delete
           node "$GATE" ai
 
       - name: Verdict
