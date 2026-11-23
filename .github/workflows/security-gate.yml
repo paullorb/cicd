@@ -1,0 +1,245 @@
+name: Security gate
+
+# The required "Security gate" check for a repository whose pull requests merge
+# themselves once green. It must be called from a `pull_request_target` caller
+# (types: opened, synchronize, reopened, ready_for_review; no `paths:` filter,
+# so the required check always reports), which makes the gate BASE-defined: a
+# pull request cannot edit the copy that judges it. The price of
+# pull_request_target is a privileged job next to untrusted content, so this
+# job checks the PR head out as DATA only. It never installs, builds, tests or
+# runs anything from it: `git diff`/`git show` read it, gitleaks scans its
+# commits with a config this job writes, and Claude Code reads a copy of it
+# with Read/Grep/Glob only.
+#
+# Layers:
+#   1. Deterministic rules (scripts/security-gate.mjs, unit-tested by
+#      self-check.yml): migrations, workflows, server actions, secrets,
+#      install scripts. Any finding blocks. Seconds.
+#   2. AI review, only when a changed file is on the caller's sensitive list
+#      (or is a "use server" file): Claude Code headless with the caller's
+#      CLAUDE_CODE_OAUTH_TOKEN. High severity blocks; medium and low are
+#      reported. No token, a failure or a timeout never blocks on its own:
+#      the check passes with "AI review skipped: <why>".
+#
+# The result is a check run named `check-name` created through the Checks API
+# on the PR HEAD sha. The job's own check run belongs to the base commit a
+# pull_request_target run is attached to, so it cannot satisfy a required
+# check on the PR; the explicit one can. One sticky comment carries the
+# findings.
+#
+# Caller (paullorber's .github/workflows/security.yml):
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened, ready_for_review]
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     checks: write
+#   jobs:
+#     gate:
+#       uses: paullorb/cicd/.github/workflows/security-gate.yml@<SHA>
+#       with:
+#         cicd-ref: <the same SHA>
+#         sensitive-paths: |
+#           ...
+#       secrets:
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      cicd-ref:
+        description: The commit of paullorb/cicd to run the gate script from; the same SHA the caller pins in `uses:`. (A reusable workflow's checkout fetches its caller, so it is told where it came from.)
+        type: string
+        required: true
+      sensitive-paths:
+        description: Newline-separated globs (`**` crosses directories, `*` does not; a pattern matching a directory covers everything under it). A change to any of them runs the AI review.
+        type: string
+        required: true
+      threat-model:
+        description: What the AI reviewer must protect, in a few sentences. Repo-specific; the default is a generic single-owner model.
+        type: string
+        default: ""
+      server-action-guard:
+        description: Regex that every exported function of a "use server" file must contain (an owner/auth check).
+        type: string
+        default: '\bgetOwner\w*\s*\('
+      gate-caller:
+        description: The caller workflow's path. A PR may change it only by moving its pinned SHA.
+        type: string
+        default: .github/workflows/security.yml
+      check-name:
+        description: The name of the check run on the PR head; make exactly this a required status check.
+        type: string
+        default: Security gate
+      model:
+        type: string
+        default: claude-opus-5-5
+      claude-code-version:
+        description: Exact @anthropic-ai/claude-code version for the AI review.
+        type: string
+        default: 2.1.323
+      ai-timeout-seconds:
+        type: number
+        default: 480
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: From `claude setup-token`. Without it the AI layer is skipped with a warning.
+        required: false
+
+jobs:
+  gate:
+    name: review
+    # Routed like every other job (app-ci.yml explains the default); Dependabot
+    # and fork PRs get a disposable VM. Nothing from the PR executes on either.
+    runs-on: ${{ (github.actor == 'dependabot[bot]' || github.event.pull_request.user.login == 'dependabot[bot]' || startsWith(github.head_ref, 'dependabot/') || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
+    # The AI review is capped at ai-timeout-seconds (8 minutes by default);
+    # the rest takes well under a minute.
+    timeout-minutes: 15
+    concurrency:
+      group: security-gate-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      GATE: ${{ github.workspace }}/.security-gate-cicd/scripts/security-gate.mjs
+      CHECK_NAME: ${{ inputs.check-name }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: What this job is for
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TLDR'
+          #### Security gate
+
+          Reviews a pull request from the base branch's own definition before it can auto-merge: deterministic rules on migrations, workflows, server actions, secrets and install scripts, then a read-only Claude Code review when sensitive paths changed. The verdict is the `Security gate` check on the PR head and one sticky PR comment.
+
+          ❌ Read the PR comment: each 🛑 row names the file, line and why. Fix the code and push; for a gitleaks false positive add a `gitleaks:allow` comment on that line. Do not edit the gate's caller to get past it: that change is itself blocked.
+          TLDR
+
+      - name: Refuse anything but a pull request event
+        if: ${{ github.event_name != 'pull_request_target' }}
+        run: |
+          echo "::error::security-gate.yml must be called from a pull_request_target workflow (got ${{ github.event_name }}): only then is the gate the base branch's copy."
+          exit 1
+
+      # The gate's own code, from the exact commit the caller pinned.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: paullorb/cicd
+          ref: ${{ inputs.cicd-ref }}
+          path: .security-gate-cicd
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      # Results live in RUNNER_TEMP, which the runner empties for every job:
+      # a persistent runner must never hand one PR's verdict to the next.
+      - name: Open the check on the PR head
+        id: start
+        run: |
+          {
+            echo "GATE_RESULT=$RUNNER_TEMP/security-gate.json"
+            echo "AI_RESULT=$RUNNER_TEMP/security-gate-ai.json"
+            echo "GITLEAKS_REPORT=$RUNNER_TEMP/security-gate-gitleaks.json"
+          } >> "$GITHUB_ENV"
+          node "$GATE" start
+
+      # DATA ONLY. Full history, for the merge-base diff and the commit scan.
+      # No credentials are left in it; nothing below executes a file from it.
+      - name: Check out the pull request head (as data)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .security-gate-head
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      # The pinned binary and checksums from muk-ci.yml's secret scan (its
+      # comment says why not gitleaks-action).
+      - name: Install gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS $(uname -m)" in
+            "macOS arm64")
+              asset=gitleaks_8.24.3_darwin_arm64.tar.gz
+              sha=b90f13bb8c90ab72083d9b0c842e39dafb82c0e5c3f872f407366b7a58909013 ;;
+            "Linux x86_64")
+              asset=gitleaks_8.24.3_linux_x64.tar.gz
+              sha=9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c ;;
+            *)
+              echo "::error::No pinned gitleaks build for $RUNNER_OS/$(uname -m) — add its checksum here."
+              exit 1 ;;
+          esac
+          curl -sSfL --retry 3 --retry-delay 2 --retry-all-errors --retry-max-time 60 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/$asset" \
+            -o "$RUNNER_TEMP/gitleaks.tgz"
+          echo "$sha  $RUNNER_TEMP/gitleaks.tgz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+
+      # Only the PR's own commits (base..head). The config and the ignore file
+      # are this job's, not the PR's: a PR could otherwise add a .gitleaks.toml
+      # or .gitleaksignore that silences the scan. Inline `gitleaks:allow`
+      # still works, and is visible in the diff.
+      - name: Scan the pull request's commits for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'title = "security gate"\n[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+          mkdir -p "$RUNNER_TEMP/gitleaks-ignore"
+          rm -f "$GITLEAKS_REPORT"
+          "$RUNNER_TEMP/gitleaks" git .security-gate-head \
+            --log-opts="$BASE_SHA..$HEAD_SHA" \
+            --config "$RUNNER_TEMP/gitleaks.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-ignore" \
+            --no-banner --redact --exit-code 0 \
+            --report-format json --report-path "$GITLEAKS_REPORT"
+
+      - name: Deterministic rules
+        id: scan
+        env:
+          REPO_DIR: .security-gate-head
+          SENSITIVE_PATHS: ${{ inputs.sensitive-paths }}
+          SERVER_ACTION_GUARD: ${{ inputs.server-action-guard }}
+          GATE_CALLER: ${{ inputs.gate-caller }}
+        run: node "$GATE" scan
+
+      # A copy outside $HOME with no .git and no symlinks, so the reviewer's
+      # Read(./**) cannot follow a planted link out of the tree and the deny
+      # rules on ~ do not cover its own working directory.
+      - name: AI review (sensitive paths only)
+        if: ${{ steps.scan.outputs.sensitive == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 12
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+          CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+          AI_TIMEOUT_SECONDS: ${{ inputs.ai-timeout-seconds }}
+          THREAT_MODEL: ${{ inputs.threat-model }}
+        run: |
+          set -euo pipefail
+          REVIEW_DIR="$(mktemp -d /tmp/security-gate-review.XXXXXX)"
+          export REVIEW_DIR
+          echo "REVIEW_DIR=$REVIEW_DIR" >> "$GITHUB_ENV"
+          cp -R .security-gate-head/. "$REVIEW_DIR/"
+          rm -rf "$REVIEW_DIR/.git"
+          find "$REVIEW_DIR" -type l -delete
+          node "$GATE" ai
+
+      - name: Verdict
+        if: ${{ always() }}
+        env:
+          CHECK_RUN_ID: ${{ steps.start.outputs.check_run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -n "${REVIEW_DIR:-}" ]; then rm -rf "$REVIEW_DIR"; fi
+          node "$GATE" finish
