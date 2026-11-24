@@ -196,9 +196,9 @@ jobs:
           ❌ Read the step that failed. A lint or type error is yours to fix; a bundle-budget failure means this change grew the client bundle past `bundle-budgets.json` and needs slimming or a deliberate, reviewed budget bump.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           # The self-hosted machine already keeps ~/.npm between jobs. The
@@ -262,7 +262,7 @@ jobs:
           ❌ Treat it as a live incident: ROTATE the exposed credential first, then rewrite history to remove it. Deleting the commit alone is not a fix.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Scan history, not just the tip: a secret committed and then
           # "removed" in a follow-up commit is still in every clone.
@@ -330,12 +330,12 @@ jobs:
           ❌ The new dependency tree carries a high-severity advisory. It also reports pre-existing ones, so check whether this change actually introduced it before treating it as a blocker. A ⚠️ saying the endpoint did not answer means nothing was audited and this check passed anyway — registry.npmjs.org was down, and the nightly audit is the backstop.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Needed to diff against the PR base.
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -483,12 +483,12 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Both sides of the diff have to be present to compare them.
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -614,13 +614,13 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The staleness check dates each function's last source change at the
           # BASE of the PR, which needs history beyond the merge commit.
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -679,7 +679,7 @@ jobs:
           ❌ Do not merge. Either a migration is not replayable (it depends on state only production has), or a policy or trigger lets the wrong caller through. Catching an unscoped SECURITY DEFINER function here is the whole point: the production-side assert only sees it after deploy, which is how a past change turned main red post-merge.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure a local PostgreSQL with the pg_cron stub
         shell: bash
@@ -900,11 +900,11 @@ jobs:
       # fetch-depth: 0, because the scope step below diffs against the merge
       # base. The self-hosted pool keeps a warm checkout, so this is an
       # incremental fetch there; a Dependabot PR pays a full clone once.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -1299,9 +1299,9 @@ jobs:
           ❌ The app may be live against a backend that is not what this commit expects. Schema and functions cannot silently diverge (a failed migration stops the job before any function deploys), but fix this before merging anything further.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -1466,7 +1466,7 @@ jobs:
           ❌ Either the deploy failed, or it succeeded but the domain never served the new build (an alias or custom-domain slip). Production is likely still serving the previous commit.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The build reads commit subjects to map each commit to the PR that
           # carried it (muk.events#731), and squash-merge subjects end in
@@ -1474,7 +1474,7 @@ jobs:
           # one entry and every older row would fall back to its hash.
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -1705,9 +1705,9 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false

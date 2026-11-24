@@ -102,7 +102,7 @@ jobs:
       MODE: ${{ inputs.mode }}
       DEPLOY_FUNCTIONS: ${{ inputs.deploy_functions }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -157,7 +157,7 @@ jobs:
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       # v1 of the action, pinned to a commit; the CLI itself is the input.
-      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13 # v1
         if: steps.gate.outputs.ready == 'true'
         with:
           version: ${{ inputs.cli_version }}
