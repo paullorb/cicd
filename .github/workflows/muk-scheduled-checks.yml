@@ -108,13 +108,13 @@ jobs:
           ❌ A merge never reached production — most often a deploy job skipped when an unrelated job was red. Find what is pending and deploy it.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The function staleness check dates each function's last source
           # change, which needs more history than the tip commit.
           fetch-depth: 0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -197,9 +197,9 @@ jobs:
           ❌ Read the advisor output. A security-category finding on a shared-database project deserves same-day attention.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -242,9 +242,9 @@ jobs:
           ❌ A resource trend is heading somewhere bad — this exists to turn a slow squeeze like a filling data disk into a next-morning email instead of an outage. A failure naming a MISSING metric means the beta API renamed something and the assertion needs updating, not that the database is unhealthy.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -291,9 +291,9 @@ jobs:
           ❌ One of three things, and the failure line says which: a meter is over 90% of its budget (look at the bill), a meter was not measured (a source wired to no budget or vice versa), or a vendor API could not be read. The last two fail rather than skip on purpose — an unwatched meter everyone believes is watched is how July's minute exhaustion went unnoticed.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
@@ -345,9 +345,9 @@ jobs:
           ❌ Production is emitting something the registry does not claim — usually a write site added without registering it, or a feature whose actor classes drifted. Rare or dead kinds are only reported, never failed.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -384,9 +384,9 @@ jobs:
           ❌ Somebody has to act: a dispatcher row is missing (the insert is in docs/instagram-promotion.md), the token refresh failed or the token is inside eight days of expiry, a post has carried a refusal for more than a day, or a promo cron job's last run did not succeed. A missing token row alone is a note, not a failure.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -434,9 +434,9 @@ jobs:
           **Red means** a kind is past its ceiling: twice its own worst day of the previous 30, and never fewer than three. The digest on each row is the same code the member was shown and the server log line carries.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -510,9 +510,9 @@ jobs:
           ❌ A new CVE affects a production dependency. Delivery is not blocked — that is the trade — so treat it as a same-week task. Most advisories here land on transitive dev dependencies and are answered with a ranged `overrides` entry in package.json rather than a Dependabot PR.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -647,10 +647,10 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.creds.outputs.ok == 'true'
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.creds.outputs.ok == 'true'
         with:
           node-version-file: .nvmrc
@@ -736,7 +736,7 @@ jobs:
       # the Playwright report in muk-browser-matrix.yml.
       - name: Upload Lighthouse reports
         if: ${{ always() && steps.creds.outputs.ok == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lighthouse-reports
           path: .lighthouseci/*.json
@@ -776,9 +776,9 @@ jobs:
           ❌ The metrics could not be computed (a GitHub API or permissions problem). Nothing about delivery is broken.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
@@ -812,9 +812,9 @@ jobs:
           ❌ A real regression: something newly duplicated, dead or unused, named in the summary above. Raising a budget is a deliberate, reviewed acceptance — never a way to quiet the gate.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           # See muk-ci.yml: the runner-local npm cache is already warm; the
@@ -874,9 +874,9 @@ jobs:
           ❌ A decision is due, not a breakage. Adopt the shared primitive, or acknowledge why this one stands with a written reason in `code-consistency-budgets.json` — never a raised number, because almost every finding here has two legitimate answers and only the acknowledgement records which one was chosen.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           # See muk-ci.yml: the runner-local npm cache is already warm; the
@@ -941,9 +941,9 @@ jobs:
           ❌ A copy decision is due, not a breakage. Rewrite the string, or acknowledge it with a reason in `copy-quality-budgets.json` — never a raised ceiling. One red differs in kind: if extraction found almost no strings, the READER is broken rather than the copy being clean, and nothing else in the summary can be trusted until that is fixed.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           # See muk-ci.yml: the runner-local npm cache is already warm; the
@@ -994,9 +994,9 @@ jobs:
           ❌ A DECISION is due, not a breakage. Read the table above, then either do the upgrade or record why we are waiting in `tech-stack-acknowledged.json`. Minor and patch drift never signals here — that is Dependabot's job. The reasoning behind every tool choice lives in `docs/tech-stack.md`.
           TLDR
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           # See muk-ci.yml: the runner-local npm cache is already warm; the
