@@ -85,15 +85,16 @@ on:
       # muk.events passes its self-hosted pool for iOS: that Mac already has
       # Xcode, and a hosted macOS minute costs ten of a Linux one — an unsigned
       # archive on every native-touching pull request is worth having, and worth
-      # not paying ten times over. Android stays on ubuntu-latest, where the
-      # image ships the SDK the Gradle build expects.
+      # not paying ten times over. Android runs there too since 2026-11-26: the
+      # SDK is installed on that Mac (~/Library/Android/sdk), and the job's
+      # "Find the Android SDK" step points the build at it.
       # Both default to the caller's own pool, like pr-overlap.yml's `runs_on`:
       # hosted minutes are account-wide (and a macOS one bills as ten), so a
       # hosted image is something a caller asks for by name, with its reason in
       # paullorb/paullorber's scripts/lib/hosted-runners.mjs, never what a
       # caller that passes nothing gets.
       android_runs_on:
-        description: JSON runner labels for the Android job. The pool needs the Android SDK; a caller without one passes '"ubuntu-latest"'.
+        description: JSON runner labels for the Android job. The pool needs an Android SDK (found at ANDROID_HOME, ANDROID_SDK_ROOT or ~/Library/Android/sdk); a caller whose runners have none passes '"ubuntu-latest"'.
         required: false
         default: '["self-hosted","app-ci"]'
         type: string
@@ -123,6 +124,28 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+
+      # A hosted image exports ANDROID_HOME. A self-hosted runner is a
+      # LaunchAgent with next to no environment: the SDK is on the box and
+      # nothing names it, so Gradle stops with "SDK location not found" and the
+      # identity check below has no aapt. Found here rather than in each
+      # runner's .env, which every new runner would have to be given again.
+      - name: Find the Android SDK
+        run: |
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms" ]; then
+            echo "Android SDK: $ANDROID_HOME (from the environment)"
+            exit 0
+          fi
+          for sdk in "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+            if [ -n "$sdk" ] && [ -d "$sdk/platforms" ]; then
+              echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+              echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+              echo "Android SDK: $sdk"
+              exit 0
+            fi
+          done
+          echo "::error::No Android SDK on this runner (looked at ANDROID_HOME, ANDROID_SDK_ROOT, ~/Library/Android/sdk and ~/Android/Sdk). Install one, or pass android_runs_on '\"ubuntu-latest\"' and add the job to ALLOWED_HOSTED in paullorb/paullorber."
+          exit 1
 
       - name: Install dependencies and sync Capacitor
         run: |
