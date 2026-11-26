@@ -60,7 +60,7 @@ workflows it calls (`app-auto-merge.yml`, `pr-overlap.yml`) default to
 The account's 3,000 hosted minutes a month are spent only by **private**
 repositories (standard hosted runners are free for public ones), and every
 private repo has its own runner, so hosted is the exception that has to
-explain itself. Three things are hosted by design:
+explain itself. Two things are hosted by design:
 
 - **Dependabot's pull requests** run on `ubuntu-latest` whatever the variable
   says, in every routed job: a bumped package's install script or tests on a
@@ -69,8 +69,6 @@ explain itself. Three things are hosted by design:
   header there says why), and the run that decides the PR is on the pool.
 - **`muk-runner-watchdog.yml`**, once a day: the alarm for the runners cannot
   run on them.
-- **muk's Android bundle** (`android_runs_on: '"ubuntu-latest"'`): the Mac
-  Studio has no Android SDK.
 
 Everything else is a finding. paullorber's `scripts/issue-keeper.mjs` reads
 every private repo's workflows and label variables (and this repo's reusable
@@ -88,10 +86,9 @@ hand remains the escape hatch, as a decision to spend the quota; the keeper
 files it as a finding and muk's watchdog sets muk's back once the pool is up.
 
 Expected spend in muk with this in place, from November 2026's runs: about
-30 minutes for the watchdog, about 70 for Android builds, about 50 for
-Dependabot's pull requests (2 per push for the handover, about 4 for the
+30 minutes for the watchdog, about 50 for Dependabot's pull requests (2 per push for the handover, about 4 for the
 auto-fix and impact jobs) and about 30 for Dependabot's own update jobs:
-roughly 180 a month against November's 629. The other private repos billed
+roughly 110 a month against November's 629. The other private repos billed
 nothing in November because their Dependabot jobs waited for a `dependabot`
 runner; once those run hosted, each update job is about 2 minutes and each
 Dependabot push one `app-ci.yml` job.
@@ -303,6 +300,12 @@ verdict.)
 
    A second instance (`~/actions-runner-$repo-2`, name suffixed `-2`) is
    only worth it for a repo whose PRs run several jobs at once.
+   Then `node ~/Developer/paullorber/scripts/runner-preflight.mjs` in the
+   new checkout must pass before its first workflow is pushed: it fails until
+   a runner with the label is registered and online and no workflow names a
+   hosted runner outside the allowlist. A repo that starts without its
+   runner spends hosted minutes from its first pull request (fahren: 181 in
+   its first day, 2026-11-23).
 1. Point a small caller workflow in the app repo at `app-ci.yml@<SHA>`.
 2. Pass the caller's Node version file when it is not `.node-version`.
 3. Add the `auto-merge.yml` caller, and the `supabase.yml` caller when the
