@@ -496,12 +496,26 @@ function lockPackages(lockText) {
   for (const [key, entry] of Object.entries(packages)) {
     const at = key.lastIndexOf("node_modules/");
     if (at === -1 || entry?.link) continue; // the root, workspaces and links to them
-    const name = key.slice(at + "node_modules/".length);
-    const versions = byName.get(name) ?? new Set();
-    versions.add(String(entry?.version ?? "?"));
+    // An npm alias installs the package in `name` under another folder's
+    // name; the package is what counts, not the folder.
+    const folder = key.slice(at + "node_modules/".length);
+    const name = typeof entry?.name === "string" && entry.name ? entry.name : folder;
+    const versions = byName.get(name) ?? new Map();
+    const version = String(entry?.version ?? "?");
+    versions.set(version, (versions.get(version) ?? true) && fromRegistry(name, version, entry?.resolved));
     byName.set(name, versions);
   }
   return byName;
+}
+
+// Whether a lockfile entry installs what it says: npm fetches `resolved`, not
+// the name, so an entry may claim an accepted name and point anywhere. An
+// entry without `resolved` (bundled, or written by an older npm) is fetched
+// from the registry by name and version.
+function fromRegistry(name, version, resolved) {
+  if (resolved === undefined) return true;
+  const base = name.slice(name.lastIndexOf("/") + 1);
+  return resolved === `https://registry.npmjs.org/${name}/-/${base}-${version}.tgz`;
 }
 
 export function dependencyChanges(baseLockText, headLockText, accepted = []) {
@@ -515,11 +529,11 @@ export function dependencyChanges(baseLockText, headLockText, accepted = []) {
   for (const [name, versions] of head) {
     const before = base.get(name);
     if (before) {
-      if ([...versions].some((v) => !before.has(v))) changed += 1;
+      if ([...versions.keys()].some((v) => !before.has(v))) changed += 1;
       continue;
     }
-    for (const version of versions) {
-      if (!PACKAGE_NAME.test(name) || name.length > 214 || !PACKAGE_VERSION.test(version) || version.length > 64) unusual += 1;
+    for (const [version, registry] of versions) {
+      if (!registry || !PACKAGE_NAME.test(name) || name.length > 214 || !PACKAGE_VERSION.test(version) || version.length > 64) unusual += 1;
       else added.push({ name, version, accepted: isAccepted(name, version) });
     }
   }
@@ -701,7 +715,7 @@ export function dependencyNote(dependencies) {
   const lines = [`${changed} package(s) already in the tree change version, ${removed} leave it, ${added.length + unusual} are new to it.`];
   for (const p of added.slice(0, MAX_PROMPT_NEW_PACKAGES)) lines.push(`- new: ${p.name}@${p.version}${p.accepted ? " (ACCEPTED BY THE OWNER)" : ""}`);
   if (added.length > MAX_PROMPT_NEW_PACKAGES) lines.push(`- and ${added.length - MAX_PROMPT_NEW_PACKAGES} more new packages; read package-lock.json for them.`);
-  if (unusual) lines.push(`- ${unusual} new lockfile entr${unusual === 1 ? "y has" : "ies have"} a name or version that is not shaped like an npm package's; look at them in package-lock.json.`);
+  if (unusual) lines.push(`- ${unusual} new lockfile entr${unusual === 1 ? "y has" : "ies have"} a name or version that is not shaped like an npm package's, or resolve from somewhere other than that package's place on registry.npmjs.org; look at them in package-lock.json.`);
   return lines.join("\n");
 }
 

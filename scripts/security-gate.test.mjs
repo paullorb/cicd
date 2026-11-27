@@ -657,3 +657,33 @@ test("the prompt carries the gate's reading of the lockfile outside the diff mar
   assert.equal(dependencyChanges(lock({}), "not json"), null);
   assert.deepEqual(newPackageNotes(null), []);
 });
+
+test("an alias or a forged entry cannot borrow an accepted package's name", () => {
+  const accepted = parseAcceptedPackages("accepted@1.0.0");
+  // The folder says "accepted", the package installed is "unreviewed".
+  const alias = dependencyChanges(lock({}), lock({ "node_modules/accepted": { name: "unreviewed", version: "1.0.0", resolved: "https://registry.npmjs.org/unreviewed/-/unreviewed-1.0.0.tgz" } }), accepted);
+  assert.deepEqual(alias.added, [{ name: "unreviewed", version: "1.0.0", accepted: false }]);
+  // The entry says "accepted", the tarball is something else.
+  const forged = dependencyChanges(lock({}), lock({ "node_modules/accepted": { version: "1.0.0", resolved: "https://registry.npmjs.org/unreviewed/-/unreviewed-1.0.0.tgz" } }), accepted);
+  assert.deepEqual(forged.added, []);
+  assert.equal(forged.unusual, 1);
+  assert.match(dependencyNote(forged), /resolve from somewhere other/);
+  const elsewhere = dependencyChanges(lock({}), lock({ "node_modules/accepted": { version: "1.0.0", resolved: "git+ssh://git@github.com/x/accepted.git#abc" } }), accepted);
+  assert.equal(elsewhere.unusual, 1);
+  // The real thing, scoped and plain, with and without `resolved`.
+  const real = dependencyChanges(
+    lock({}),
+    lock({
+      "node_modules/accepted": { version: "1.0.0", resolved: "https://registry.npmjs.org/accepted/-/accepted-1.0.0.tgz" },
+      "node_modules/@scope/pkg": { version: "2.0.0", resolved: "https://registry.npmjs.org/@scope/pkg/-/pkg-2.0.0.tgz" },
+      "node_modules/bundled": { version: "3.0.0", inBundle: true },
+    }),
+    accepted,
+  );
+  assert.deepEqual(real.added.map((p) => [p.name, p.accepted]), [["@scope/pkg", false], ["accepted", true], ["bundled", false]]);
+  assert.equal(real.unusual, 0);
+  // An alias of a package already in the tree is that package, not a new one.
+  const again = dependencyChanges(lock({ "node_modules/semver": { version: "7.6.0" } }), lock({ "node_modules/semver": { version: "7.6.0" }, "node_modules/semver6": { name: "semver", version: "6.3.1" } }));
+  assert.deepEqual(again.added, []);
+  assert.equal(again.changed, 1);
+});
