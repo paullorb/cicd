@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -74,7 +74,10 @@ function unquotePath(raw) {
 }
 
 // Parses `git diff --unified=0 --no-renames` into
-// Map(path -> { added: [{ line, text }], removed: [text] }).
+// Map(path -> { added: [{ line, text }], removed: [text], removedAfter: [line] }).
+// `removedAfter` holds, for every hunk that only deletes, the head line the
+// deleted lines used to follow (0 at the top of the file): a deletion has no
+// line of its own in the head, so this is where it happened.
 export function parseUnifiedDiff(diffText) {
   const files = new Map();
   let current = null;
@@ -93,13 +96,14 @@ export function parseUnifiedDiff(diffText) {
     if (raw.startsWith("+++ ")) {
       const path = raw === "+++ /dev/null" ? oldPath : unquotePath(raw.slice(4)).replace(/^b\//, "");
       if (path === null) continue;
-      current = files.get(path) ?? { added: [], removed: [] };
+      current = files.get(path) ?? { added: [], removed: [], removedAfter: [] };
       files.set(path, current);
       continue;
     }
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(raw);
     if (hunk) {
       nextLine = Number(hunk[1]);
+      if (current && hunk[2] === "0") current.removedAfter.push(nextLine);
       continue;
     }
     if (!current) continue;
@@ -392,7 +396,12 @@ export function exportedServerActions(text) {
   return actions;
 }
 
-export function serverActionFindings(path, headText, addedLines, guardPattern) {
+// An action is judged when the PR touched it: a line added inside it, or lines
+// deleted from inside it (`removedAfter`, from parseUnifiedDiff). A PR that
+// only deletes an action's owner check adds no line at all, and must not pass
+// as "untouched". A deletion after head line L is inside an action when L is
+// any of its lines but the last.
+export function serverActionFindings(path, headText, addedLines, guardPattern, removedAfter = []) {
   if (!isUseServerFile(headText)) return [];
   const guard = new RegExp(guardPattern);
   const lines = headText.split("\n");
@@ -405,6 +414,7 @@ export function serverActionFindings(path, headText, addedLines, guardPattern) {
         break;
       }
     }
+    if (!touched) touched = [...removedAfter].some((l) => l >= action.startLine && l < action.endLine);
     if (!touched) continue;
     if (guard.test(action.body)) continue;
     const before = lines.slice(Math.max(0, action.startLine - 4), action.startLine - 1).join("\n");
@@ -884,13 +894,13 @@ export function scanRepository({ repoDir, baseSha, headSha, headRef = "", patter
   const files = [];
   const findings = [];
   for (const [path, status] of statuses) {
-    const changes = parsed.get(path) ?? { added: [], removed: [] };
+    const changes = parsed.get(path) ?? { added: [], removed: [], removedAfter: [] };
     const addedLines = new Set(changes.added.map((a) => a.line));
     const headText = status === "D" ? null : showFile(repoDir, headSha, path);
     let sensitive = isSensitive(path, patterns);
     if (headText !== null && /\.[cm]?[jt]sx?$/.test(path) && isUseServerFile(headText)) {
       sensitive = true; // every server action is an endpoint, wherever it lives
-      findings.push(...serverActionFindings(path, headText, addedLines, guardPattern));
+      findings.push(...serverActionFindings(path, headText, addedLines, guardPattern, changes.removedAfter));
     }
     if (isWorkflowFile(path)) findings.push(...workflowFindings(path, changes.added, { removed: changes.removed, gateCaller }));
     if (headText !== null && path.endsWith(".sql")) findings.push(...sqlFindings(path, headText, addedLines));
@@ -981,6 +991,28 @@ function lastLine(text) {
   return String(text ?? "").trim().split("\n").filter(Boolean).pop()?.slice(0, 200) ?? "";
 }
 
+// Installs a reviewer's CLI into a fresh directory under its throwaway home
+// and returns the absolute path of its executable. Never `npx` in the review
+// copy: npm reads the working directory's .npmrc (a registry of the PR's
+// choosing) and prefers a `node_modules/.bin/<name>` it finds there, so a
+// pull request could plant the program that receives the reviewer's
+// credential. Here npm's working directory and prefix are both the new
+// directory, so no file of the PR takes part in resolving the CLI.
+export async function installCli({ spec, bin, home, env, timeoutMs }) {
+  const prefix = join(home, "cli");
+  mkdirSync(prefix);
+  const result = await runWithTimeout("npm", ["install", "--prefix", prefix, "--no-save", "--no-package-lock", "--loglevel", "error", spec], { cwd: prefix, env }, "", timeoutMs);
+  if (result.timedOut) return { error: `installing ${spec} did not finish within ${Math.round(timeoutMs / 1000)}s` };
+  const path = join(prefix, "node_modules", ".bin", bin);
+  if (result.code !== 0 || !existsSync(path)) return { error: `installing ${spec} failed (${lastLine(result.stderr) || `npm exited ${result.code}`})` };
+  return { path };
+}
+
+// What is left of a reviewer's budget after its CLI was installed.
+function remaining(ctx, started) {
+  return Math.max(1000, ctx.timeoutMs - (Date.now() - started));
+}
+
 async function reviewWithClaude(ctx) {
   const home = throwawayHome("claude");
   const settings = {
@@ -996,7 +1028,6 @@ async function reviewWithClaude(ctx) {
   writeFileSync(settingsPath, JSON.stringify(settings));
   const model = ctx.reviewer.model || ctx.claudeModel;
   const args = [
-    "-y", `@anthropic-ai/claude-code@${ctx.claudeCodeVersion}`,
     "-p", "--restricted", "--strict-mcp-config",
     "--settings", settingsPath,
     "--tools", "Read,Grep,Glob",
@@ -1008,8 +1039,11 @@ async function reviewWithClaude(ctx) {
     "--output-format", "json",
   ];
   const childEnv = { ...baseEnv(home), CLAUDE_CODE_OAUTH_TOKEN: ctx.env.CLAUDE_CODE_OAUTH_TOKEN, DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
-  const result = await runWithTimeout("npx", args, { cwd: ctx.reviewDir, env: childEnv }, ctx.prompt(), ctx.timeoutMs);
   const base = { model, version: ctx.claudeCodeVersion };
+  const started = Date.now();
+  const cli = await installCli({ spec: `@anthropic-ai/claude-code@${ctx.claudeCodeVersion}`, bin: "claude", home, env: baseEnv(home), timeoutMs: ctx.timeoutMs });
+  if (cli.error) return { ...base, status: "unavailable", reason: cli.error };
+  const result = await runWithTimeout(cli.path, args, { cwd: ctx.reviewDir, env: childEnv }, ctx.prompt(), remaining(ctx, started));
   if (result.timedOut) return { ...base, status: "unavailable", reason: `did not finish within ${ctx.timeoutMs / 1000}s` };
   let envelope;
   try {
@@ -1083,7 +1117,6 @@ async function reviewWithCodex(ctx) {
   writeFileSync(schemaPath, JSON.stringify(VERDICT_SCHEMA));
   const lastMessage = join(home, "last-message.txt");
   const args = [
-    "-y", `@openai/codex@${ctx.codexVersion}`,
     "exec",
     "--strict-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
     "--color", "never",
@@ -1094,7 +1127,10 @@ async function reviewWithCodex(ctx) {
     "-",
   ];
   const childEnv = { ...baseEnv(home), CODEX_HOME: home, CODEX_API_KEY: ctx.env.CODEX_API_KEY };
-  const result = await runWithTimeout("npx", args, { cwd: ctx.reviewDir, env: childEnv }, ctx.prompt(), ctx.timeoutMs);
+  const started = Date.now();
+  const cli = await installCli({ spec: `@openai/codex@${ctx.codexVersion}`, bin: "codex", home, env: baseEnv(home), timeoutMs: ctx.timeoutMs });
+  if (cli.error) return { model: ctx.reviewer.model ?? "", version: ctx.codexVersion, status: "unavailable", reason: cli.error };
+  const result = await runWithTimeout(cli.path, args, { cwd: ctx.reviewDir, env: childEnv }, ctx.prompt(), remaining(ctx, started));
   const model = /^model:\s*(\S+)/m.exec(result.stderr)?.[1] ?? ctx.reviewer.model ?? "";
   const base = { model, version: ctx.codexVersion };
   if (result.timedOut) return { ...base, status: "unavailable", reason: `did not finish within ${ctx.timeoutMs / 1000}s` };

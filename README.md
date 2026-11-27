@@ -253,6 +253,12 @@ verdict.)
   | `codex` | secret `CODEX_API_KEY` (an OpenAI API key; `codex exec` reads it from that variable); model: the `CODEX_MODEL` variable, else Codex's default | `codex exec` `codex-version` with a throwaway `CODEX_HOME` whose `config.toml` is the only config: a permission profile that reads the system minimum and the review copy only (home folders and temp directories denied, no writes, no network), `approval_policy = "never"`, AGENTS.md not loaded, web search, apps, plugins, hooks, memories and sub-agents off, `--ignore-rules --ephemeral`, and `--output-schema` for the verdict |
   | `openai-compatible` | secret `REVIEW_API_KEY` plus the variables `REVIEW_API_BASE` (e.g. `https://generativelanguage.googleapis.com/v1beta/openai`; plain `http` only to localhost) and `REVIEW_API_MODEL` | one `POST {base}/chat/completions` from the gate script, no tools: the diff plus excerpts of the changed head files (sensitive first, 24k characters each, 120k in all) |
 
+  The two CLIs are installed at their pinned version into a fresh directory
+  of the gate's own and run by absolute path, never with `npx` in the review
+  copy: npm would read that copy's `.npmrc` and prefer a
+  `node_modules/.bin/claude` planted in it. The install counts against the
+  reviewer's `ai-timeout-seconds`.
+
   The repository variable `SECURITY_REVIEWERS` (e.g. `codex,claude`)
   limits and orders them; unset, every enabled one runs. The team policy:
   - **any** reviewer's `high` finding blocks; medium and low are reported.
