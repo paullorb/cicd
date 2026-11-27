@@ -459,6 +459,89 @@ export function installScriptFindings(baseLockText, headLockText) {
   return findings;
 }
 
+// What the pull request does to the dependency tree, read from the two
+// lockfiles rather than left to a reviewer's reading of a long diff. A package
+// counts as new when no copy of its name was in the tree before; a different
+// version of a name already there is an upgrade or a downgrade, which is
+// ordinary maintenance and not a finding by itself. Names and versions come
+// from the pull request, so only ones shaped like npm's own reach the prompt.
+const PACKAGE_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
+const PACKAGE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/;
+
+// The owner's accepted packages: `name` or `name@version`, separated by commas
+// or white space. It comes from a repository variable, which no pull request
+// can change; anything not shaped like a package is dropped.
+export function parseAcceptedPackages(text) {
+  const accepted = [];
+  for (const raw of String(text ?? "").split(/[\s,]+/)) {
+    if (!raw) continue;
+    const at = raw.lastIndexOf("@");
+    const name = at > 0 ? raw.slice(0, at) : raw;
+    const version = at > 0 ? raw.slice(at + 1) : null;
+    if (!PACKAGE_NAME.test(name) || name.length > 214) continue;
+    if (version !== null && !PACKAGE_VERSION.test(version)) continue;
+    accepted.push({ name, version });
+  }
+  return accepted;
+}
+
+function lockPackages(lockText) {
+  const byName = new Map();
+  let packages;
+  try {
+    packages = JSON.parse(lockText ?? "{}").packages ?? {};
+  } catch {
+    return null;
+  }
+  for (const [key, entry] of Object.entries(packages)) {
+    const at = key.lastIndexOf("node_modules/");
+    if (at === -1 || entry?.link) continue; // the root, workspaces and links to them
+    const name = key.slice(at + "node_modules/".length);
+    const versions = byName.get(name) ?? new Set();
+    versions.add(String(entry?.version ?? "?"));
+    byName.set(name, versions);
+  }
+  return byName;
+}
+
+export function dependencyChanges(baseLockText, headLockText, accepted = []) {
+  const head = lockPackages(headLockText);
+  if (!head) return null;
+  const base = lockPackages(baseLockText) ?? new Map();
+  const isAccepted = (name, version) => accepted.some((a) => a.name === name && (a.version === null || a.version === version));
+  const added = [];
+  let unusual = 0;
+  let changed = 0;
+  for (const [name, versions] of head) {
+    const before = base.get(name);
+    if (before) {
+      if ([...versions].some((v) => !before.has(v))) changed += 1;
+      continue;
+    }
+    for (const version of versions) {
+      if (!PACKAGE_NAME.test(name) || name.length > 214 || !PACKAGE_VERSION.test(version) || version.length > 64) unusual += 1;
+      else added.push({ name, version, accepted: isAccepted(name, version) });
+    }
+  }
+  added.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+  const removed = [...base.keys()].filter((name) => !head.has(name)).length;
+  return { added, unusual, changed, removed };
+}
+
+// New packages are shown to the owner on every report and never block by
+// themselves: an install script does (above), and so does a reviewer's
+// finding with evidence.
+export function newPackageNotes(dependencies) {
+  if (!dependencies) return [];
+  const fresh = dependencies.added.filter((p) => !p.accepted);
+  const count = fresh.length + dependencies.unusual;
+  if (!count) return [];
+  const shown = fresh.slice(0, 12).map((p) => `\`${p.name}@${p.version}\``);
+  const rest = count - shown.length;
+  const summary = `${count} package${count === 1 ? " is" : "s are"} new to the dependency tree and not on the owner's accepted list: ${shown.join(", ")}${rest > 0 ? `${shown.length ? " and " : ""}${rest} more` : ""}.`;
+  return [finding("dependency-new-package", "package-lock.json", 1, summary, { severity: "low", blocking: false })];
+}
+
 // ---------------------------------------------------------------- secrets
 
 export function gitleaksFindings(reportText) {
@@ -608,17 +691,32 @@ export const VERDICT_SCHEMA = {
 
 const PROMPT_TEMPLATE = new URL("./security-gate-prompt.md", import.meta.url);
 const SOURCE_WITH_TOOLS = "Your working directory is a read-only copy of the pull request's head, with no .git, no symlinks and no agent configuration files. Read the files around the change with your read-only tools when the diff alone does not settle a question (for example, whether a server action really checks the owner, or what a changed helper is called by). You cannot write, run the code or reach the network; do not try.";
+const MAX_PROMPT_NEW_PACKAGES = 150;
+
+// The gate's own reading of the lockfiles, for the reviewer. This text is the
+// gate's, not the pull request's: it sits outside the DIFF markers.
+export function dependencyNote(dependencies) {
+  if (!dependencies) return "The pull request does not change package-lock.json, or the gate could not read it.";
+  const { added, unusual, changed, removed } = dependencies;
+  const lines = [`${changed} package(s) already in the tree change version, ${removed} leave it, ${added.length + unusual} are new to it.`];
+  for (const p of added.slice(0, MAX_PROMPT_NEW_PACKAGES)) lines.push(`- new: ${p.name}@${p.version}${p.accepted ? " (ACCEPTED BY THE OWNER)" : ""}`);
+  if (added.length > MAX_PROMPT_NEW_PACKAGES) lines.push(`- and ${added.length - MAX_PROMPT_NEW_PACKAGES} more new packages; read package-lock.json for them.`);
+  if (unusual) lines.push(`- ${unusual} new lockfile entr${unusual === 1 ? "y has" : "ies have"} a name or version that is not shaped like an npm package's; look at them in package-lock.json.`);
+  return lines.join("\n");
+}
+
 const SOURCE_EXCERPTS = "You have no tools. Excerpts of the changed files as they are at the head follow the diff, between EXCERPTS markers. When a question needs a file you cannot see, say so in a finding rather than guess.";
 
 // One pass of placeholder substitution, so text from the pull request that
 // happens to contain "{{...}}" is never expanded.
-export function buildPrompt({ repo, prNumber, threatModel, files, findings, diff, nonce, excerpts = null, template = readFileSync(PROMPT_TEMPLATE, "utf8") }) {
+export function buildPrompt({ repo, prNumber, threatModel, files, findings, diff, nonce, excerpts = null, dependencies = null, template = readFileSync(PROMPT_TEMPLATE, "utf8") }) {
   const truncated = diff.length > MAX_PROMPT_DIFF_CHARS;
   const values = {
     PR_NUMBER: String(prNumber),
     REPO: repo,
     SOURCE: excerpts === null ? SOURCE_WITH_TOOLS : SOURCE_EXCERPTS,
     THREAT_MODEL: threatModel || "A single-owner application: every record belongs to the owner, and nothing may become readable or writable by anyone else.",
+    DEPENDENCIES: dependencyNote(dependencies),
     DETERMINISTIC: findings.length ? findings.map((f) => `- ${f.file}:${f.line} ${f.rule}: ${f.summary}`).join("\n") : "- none",
     FILES: files.map((f) => `- ${f.sensitive ? "*" : " "} ${f.status} ${f.path}`).join("\n"),
     DIFF_NOTE: truncated ? `, TRUNCATED to the first ${MAX_PROMPT_DIFF_CHARS} characters: ${excerpts === null ? "read the remaining files yourself" : "the excerpts below cover more"}` : "",
@@ -883,7 +981,7 @@ export function readCommits(repoDir, from, to) {
     });
 }
 
-export function scanRepository({ repoDir, baseSha, headSha, headRef = "", patterns, guardPattern, gateCaller, gitleaksReport }) {
+export function scanRepository({ repoDir, baseSha, headSha, headRef = "", patterns, guardPattern, gateCaller, gitleaksReport, acceptedPackages = [] }) {
   const mergeBase = git(repoDir, ["merge-base", baseSha, headSha]).trim();
   const nameStatus = git(repoDir, ["diff", "--no-renames", "--name-status", "-z", mergeBase, headSha]).split("\0");
   const statuses = new Map();
@@ -893,6 +991,7 @@ export function scanRepository({ repoDir, baseSha, headSha, headRef = "", patter
 
   const files = [];
   const findings = [];
+  let dependencies = null;
   for (const [path, status] of statuses) {
     const changes = parsed.get(path) ?? { added: [], removed: [], removedAfter: [] };
     const addedLines = new Set(changes.added.map((a) => a.line));
@@ -905,13 +1004,16 @@ export function scanRepository({ repoDir, baseSha, headSha, headRef = "", patter
     if (isWorkflowFile(path)) findings.push(...workflowFindings(path, changes.added, { removed: changes.removed, gateCaller }));
     if (headText !== null && path.endsWith(".sql")) findings.push(...sqlFindings(path, headText, addedLines));
     if (path === "package-lock.json" && headText !== null) {
-      findings.push(...installScriptFindings(showFile(repoDir, mergeBase, path), headText));
+      const baseLock = showFile(repoDir, mergeBase, path);
+      findings.push(...installScriptFindings(baseLock, headText));
+      dependencies = dependencyChanges(baseLock, headText, acceptedPackages);
+      findings.push(...newPackageNotes(dependencies));
     }
     files.push({ path, status, sensitive });
   }
   findings.push(...gitleaksFindings(gitleaksReport));
   const authorFamilies = detectAuthorFamilies({ commits: readCommits(repoDir, mergeBase, headSha), headRef });
-  return { mergeBase, files, findings, sensitive: files.some((f) => f.sensitive), authorFamilies, diff };
+  return { mergeBase, files, findings, sensitive: files.some((f) => f.sensitive), authorFamilies, dependencies, diff };
 }
 
 async function commandScan() {
@@ -926,12 +1028,17 @@ async function commandScan() {
     guardPattern: env("SERVER_ACTION_GUARD", "\\bgetOwner\\w*\\s*\\("),
     gateCaller: env("GATE_CALLER", ""),
     gitleaksReport: existsSync(gitleaksPath) ? readFileSync(gitleaksPath, "utf8") : "not-run",
+    acceptedPackages: parseAcceptedPackages(env("ACCEPTED_PACKAGES", "")),
   });
   writeFileSync(`${resultPath}.diff`, result.diff);
   writeFileSync(resultPath, JSON.stringify({ ...result, diff: undefined }, null, 2));
   setOutput("sensitive", String(result.sensitive));
   process.stdout.write(`${result.files.length} changed file(s), ${result.files.filter((f) => f.sensitive).length} sensitive, ${result.findings.length} deterministic finding(s).\n`);
   for (const f of result.findings) process.stdout.write(`  ${f.blocking ? "BLOCK" : "note "} ${f.file}:${f.line} ${f.rule}\n`);
+  if (result.dependencies) {
+    const { added, unusual, changed } = result.dependencies;
+    process.stdout.write(`Dependencies: ${changed} changed version, ${added.length + unusual} new (${added.filter((p) => p.accepted).length} accepted by the owner).\n`);
+  }
   process.stdout.write(`Written with: ${result.authorFamilies.map((a) => `${a.family} (${a.evidence})`).join(", ") || "no harness detected"}.\n`);
 }
 
@@ -1222,7 +1329,7 @@ async function commandAi() {
     claudeModel: env("CLAUDE_MODEL_DEFAULT", "claude-opus-5-5"),
     claudeCodeVersion: env("CLAUDE_CODE_VERSION", "2.1.323"),
     codexVersion: env("CODEX_VERSION", "0.169.0"),
-    prompt: (excerpts = null) => buildPrompt({ repo: env("GITHUB_REPOSITORY"), prNumber: env("PR_NUMBER"), threatModel: env("THREAT_MODEL", ""), files: scan.files, findings: scan.findings, diff, nonce, excerpts }),
+    prompt: (excerpts = null) => buildPrompt({ repo: env("GITHUB_REPOSITORY"), prNumber: env("PR_NUMBER"), threatModel: env("THREAT_MODEL", ""), files: scan.files, findings: scan.findings, diff, nonce, excerpts, dependencies: scan.dependencies ?? null }),
   };
   const results = await Promise.all(
     reviewers.map(async (reviewer) => {

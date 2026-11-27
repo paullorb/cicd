@@ -234,6 +234,9 @@ jobs:
           REPO_DIR: .security-gate-head
           SENSITIVE_PATHS: ${{ inputs.sensitive-paths }}
           SERVER_ACTION_GUARD: ${{ inputs.server-action-guard }}
+          # The owner's accepted packages (`name` or `name@version`). A
+          # repository variable on purpose: a pull request cannot change it.
+          ACCEPTED_PACKAGES: ${{ vars.SECURITY_GATE_ACCEPTED_PACKAGES }}
           GATE_CALLER: ${{ inputs.gate-caller }}
         run: node "$GATE" scan
 
