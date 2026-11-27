@@ -11,8 +11,9 @@ name: App auto-merge
 # - Draft PRs are left alone; `ready_for_review` arms them.
 # - A fork's PR is never armed: no review is required on main, so arming it
 #   would land outside code on green CI alone.
-# - Dependabot's PRs are never armed (paullorber#315): what runs after the
-#   merge is not sandboxed. A person reads the bump and arms it by hand.
+# - Dependabot's PRs are not armed here: a run it triggers gets no repo
+#   secrets, so there is no app token to mint, and a GITHUB_TOKEN merge starts
+#   no deploy. paullorber's issue keeper arms them from the Mac instead.
 # - The merge is armed with the automation app's token, or a PAT, and never
 #   with GITHUB_TOKEN unless the caller asks for it: a merge made under
 #   GITHUB_TOKEN starts no workflow, so main's own CI and any deploy on push
@@ -65,7 +66,8 @@ jobs:
     # edits to the title or body are ignored.
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && !startsWith(github.event.pull_request.head.ref, 'dependabot/') && (github.event.action != 'edited' || github.event.changes.base) }}
     # The caller's own runner, or whatever its CI_LABELS says. The `if` above
-    # keeps Dependabot's and forks' PRs out, so there is no hosted fallback
+    # keeps Dependabot's and forks' PRs out (the keeper arms Dependabot's), so
+    # there is no hosted fallback
     # for them as there is in app-ci.yml, and this job checks out no code.
     runs-on: ${{ fromJSON(vars.CI_LABELS || '["self-hosted","app-ci"]') }}
     timeout-minutes: 5
