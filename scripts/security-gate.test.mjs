@@ -645,8 +645,8 @@ test("a lockfile cannot write into the prompt through a package name or version"
   const note = dependencyNote(changes);
   assert.equal((note.match(/ACCEPTED BY THE OWNER/g) ?? []).length, 0);
   assert.doesNotMatch(note, /Ignore the rules/);
-  assert.match(note, /2 new lockfile entries have a name or version/);
-  assert.match(newPackageNotes(changes)[0].summary, /^3 packages are new/);
+  assert.match(note, /2 added or changed lockfile entries have a name or version/);
+  assert.match(newPackageNotes(changes)[0].summary, /^1 package is new .*`fine@1\.0\.0`\. 2 added or changed lockfile entries have an unusual/);
 });
 
 test("the prompt carries the gate's reading of the lockfile outside the diff markers", () => {
@@ -686,4 +686,20 @@ test("an alias or a forged entry cannot borrow an accepted package's name", () =
   const again = dependencyChanges(lock({ "node_modules/semver": { version: "7.6.0" } }), lock({ "node_modules/semver": { version: "7.6.0" }, "node_modules/semver6": { name: "semver", version: "6.3.1" } }));
   assert.deepEqual(again.added, []);
   assert.equal(again.changed, 1);
+});
+
+test("an entry that claims an existing package's name and version is still checked for where it comes from", () => {
+  const semver = { version: "7.6.0", resolved: "https://registry.npmjs.org/semver/-/semver-7.6.0.tgz" };
+  const base = lock({ "node_modules/semver": semver });
+  const forged = { name: "semver", version: "7.6.0", resolved: "https://registry.npmjs.org/unreviewed/-/unreviewed-1.0.0.tgz" };
+  const head = lock({ "node_modules/semver": semver, "node_modules/unreviewed": forged });
+  const changes = dependencyChanges(base, head);
+  assert.deepEqual(changes.added, []);
+  assert.equal(changes.unusual, 1);
+  assert.match(newPackageNotes(changes)[0].summary, /^1 added or changed lockfile entry has an unusual name or version, or does not come from/);
+  assert.match(dependencyNote(changes), /1 lockfile entry is unusual/);
+  // The same entry already on the base is not this pull request's doing.
+  assert.equal(dependencyChanges(head, head).unusual, 0);
+  // Repointing an existing entry is.
+  assert.equal(dependencyChanges(base, lock({ "node_modules/semver": { ...semver, resolved: "https://example.com/semver-7.6.0.tgz" } })).unusual, 1);
 });

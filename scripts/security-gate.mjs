@@ -487,6 +487,7 @@ export function parseAcceptedPackages(text) {
 
 function lockPackages(lockText) {
   const byName = new Map();
+  const odd = new Set();
   let packages;
   try {
     packages = JSON.parse(lockText ?? "{}").packages ?? {};
@@ -500,12 +501,18 @@ function lockPackages(lockText) {
     // name; the package is what counts, not the folder.
     const folder = key.slice(at + "node_modules/".length);
     const name = typeof entry?.name === "string" && entry.name ? entry.name : folder;
-    const versions = byName.get(name) ?? new Map();
     const version = String(entry?.version ?? "?");
-    versions.set(version, (versions.get(version) ?? true) && fromRegistry(name, version, entry?.resolved));
+    // An entry that does not install what it names carries no identity: it
+    // is neither a copy of a package already in the tree nor an accepted one.
+    if (!fromRegistry(name, version, entry?.resolved)) {
+      odd.add(JSON.stringify([key, name, version, entry?.resolved ?? null]));
+      continue;
+    }
+    const versions = byName.get(name) ?? new Set();
+    versions.add(version);
     byName.set(name, versions);
   }
-  return byName;
+  return { byName, odd };
 }
 
 // Whether a lockfile entry installs what it says: npm fetches `resolved`, not
@@ -521,24 +528,26 @@ function fromRegistry(name, version, resolved) {
 export function dependencyChanges(baseLockText, headLockText, accepted = []) {
   const head = lockPackages(headLockText);
   if (!head) return null;
-  const base = lockPackages(baseLockText) ?? new Map();
+  const base = lockPackages(baseLockText) ?? { byName: new Map(), odd: new Set() };
   const isAccepted = (name, version) => accepted.some((a) => a.name === name && (a.version === null || a.version === version));
   const added = [];
-  let unusual = 0;
+  // Entries this pull request adds or changes that resolve from somewhere
+  // other than their package's place on the registry, whatever they are named.
+  let unusual = [...head.odd].filter((entry) => !base.odd.has(entry)).length;
   let changed = 0;
-  for (const [name, versions] of head) {
-    const before = base.get(name);
+  for (const [name, versions] of head.byName) {
+    const before = base.byName.get(name);
     if (before) {
-      if ([...versions.keys()].some((v) => !before.has(v))) changed += 1;
+      if ([...versions].some((v) => !before.has(v))) changed += 1;
       continue;
     }
-    for (const [version, registry] of versions) {
-      if (!registry || !PACKAGE_NAME.test(name) || name.length > 214 || !PACKAGE_VERSION.test(version) || version.length > 64) unusual += 1;
+    for (const version of versions) {
+      if (!PACKAGE_NAME.test(name) || name.length > 214 || !PACKAGE_VERSION.test(version) || version.length > 64) unusual += 1;
       else added.push({ name, version, accepted: isAccepted(name, version) });
     }
   }
   added.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
-  const removed = [...base.keys()].filter((name) => !head.has(name)).length;
+  const removed = [...base.byName.keys()].filter((name) => !head.byName.has(name)).length;
   return { added, unusual, changed, removed };
 }
 
@@ -548,11 +557,14 @@ export function dependencyChanges(baseLockText, headLockText, accepted = []) {
 export function newPackageNotes(dependencies) {
   if (!dependencies) return [];
   const fresh = dependencies.added.filter((p) => !p.accepted);
-  const count = fresh.length + dependencies.unusual;
-  if (!count) return [];
+  const { unusual } = dependencies;
+  if (!fresh.length && !unusual) return [];
   const shown = fresh.slice(0, 12).map((p) => `\`${p.name}@${p.version}\``);
-  const rest = count - shown.length;
-  const summary = `${count} package${count === 1 ? " is" : "s are"} new to the dependency tree and not on the owner's accepted list: ${shown.join(", ")}${rest > 0 ? `${shown.length ? " and " : ""}${rest} more` : ""}.`;
+  const rest = fresh.length - shown.length;
+  const parts = [];
+  if (fresh.length) parts.push(`${fresh.length} package${fresh.length === 1 ? " is" : "s are"} new to the dependency tree and not on the owner's accepted list: ${shown.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}.`);
+  if (unusual) parts.push(`${unusual} added or changed lockfile entr${unusual === 1 ? "y has" : "ies have"} an unusual name or version, or do${unusual === 1 ? "es" : ""} not come from the package's own place on registry.npmjs.org; read package-lock.json for ${unusual === 1 ? "it" : "them"}.`);
+  const summary = parts.join(" ");
   return [finding("dependency-new-package", "package-lock.json", 1, summary, { severity: "low", blocking: false })];
 }
 
@@ -712,10 +724,10 @@ const MAX_PROMPT_NEW_PACKAGES = 150;
 export function dependencyNote(dependencies) {
   if (!dependencies) return "The pull request does not change package-lock.json, or the gate could not read it.";
   const { added, unusual, changed, removed } = dependencies;
-  const lines = [`${changed} package(s) already in the tree change version, ${removed} leave it, ${added.length + unusual} are new to it.`];
+  const lines = [`${changed} package(s) already in the tree change version, ${removed} leave it, ${added.length} are new to it${unusual ? `, ${unusual} lockfile entr${unusual === 1 ? "y is" : "ies are"} unusual` : ""}.`];
   for (const p of added.slice(0, MAX_PROMPT_NEW_PACKAGES)) lines.push(`- new: ${p.name}@${p.version}${p.accepted ? " (ACCEPTED BY THE OWNER)" : ""}`);
   if (added.length > MAX_PROMPT_NEW_PACKAGES) lines.push(`- and ${added.length - MAX_PROMPT_NEW_PACKAGES} more new packages; read package-lock.json for them.`);
-  if (unusual) lines.push(`- ${unusual} new lockfile entr${unusual === 1 ? "y has" : "ies have"} a name or version that is not shaped like an npm package's, or resolve from somewhere other than that package's place on registry.npmjs.org; look at them in package-lock.json.`);
+  if (unusual) lines.push(`- ${unusual} added or changed lockfile entr${unusual === 1 ? "y has" : "ies have"} a name or version that is not shaped like an npm package's, or resolve from somewhere other than that package's place on registry.npmjs.org; look at them in package-lock.json.`);
   return lines.join("\n");
 }
 
