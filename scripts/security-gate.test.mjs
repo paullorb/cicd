@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ import {
   familyOfModel,
   exportedServerActions,
   gitleaksFindings,
+  installCli,
   installScriptFindings,
   isSensitive,
   parseAiVerdict,
@@ -87,6 +88,9 @@ test("parseUnifiedDiff tracks added line numbers per file", () => {
     "+new",
     "@@ -10,0 +11,1 @@",
     "+later",
+    "@@ -20,2 +20,0 @@",
+    "-dropped",
+    "-too",
     "diff --git a/gone.ts b/gone.ts",
     "deleted file mode 100644",
     "--- a/gone.ts",
@@ -103,7 +107,9 @@ test("parseUnifiedDiff tracks added line numbers per file", () => {
     { line: 3, text: "new" },
     { line: 11, text: "later" },
   ]);
-  assert.deepEqual(files.get("y.yml").removed, ["old"]);
+  assert.deepEqual(files.get("y.yml").removed, ["old", "dropped", "too"]);
+  assert.deepEqual(files.get("y.yml").removedAfter, [20], "a hunk that only deletes is located by the head line before it");
+  assert.deepEqual(files.get("x.sql").removedAfter, []);
   assert.deepEqual(files.get("gone.ts").removed, ["bye"]);
 });
 
@@ -252,6 +258,22 @@ test("server actions without the owner check block; marked ones are noted", () =
   );
   assert.deepEqual(serverActionFindings("a.ts", ACTIONS, new Set([1, 2, 3]), "getOwner"), []);
   assert.deepEqual(serverActionFindings("a.ts", ACTIONS.replace('"use server";', ""), all(ACTIONS), "getOwner"), []);
+});
+
+test("deleting an action's owner check is a change to that action", () => {
+  const guard = "\\bgetOwner\\w*\\s*\\(";
+  const lines = ACTIONS.split("\n");
+  const open = lines.indexOf("export async function open(form: FormData): Promise<State> {") + 1;
+  const none = new Set();
+  // Lines deleted after the action's first, or before its last line: inside it.
+  assert.deepEqual(rules(serverActionFindings("a.ts", ACTIONS, none, guard, [open])), ["server-action-no-owner"]);
+  assert.deepEqual(rules(serverActionFindings("a.ts", ACTIONS, none, guard, [open + 2])), ["server-action-no-owner"]);
+  // Before its first line or after its last: not this action's change.
+  assert.deepEqual(serverActionFindings("a.ts", ACTIONS, none, guard, [open - 1]), []);
+  assert.deepEqual(serverActionFindings("a.ts", ACTIONS, none, guard, [open + 3]), []);
+  // A deletion inside an action that still has its check passes.
+  const guarded = lines.indexOf("  const owner = await getOwner();") + 1;
+  assert.deepEqual(serverActionFindings("a.ts", ACTIONS, none, guard, [guarded]), []);
 });
 
 test("a new dependency with an install script blocks, an existing one does not", () => {
@@ -510,6 +532,49 @@ test("scanRepository end to end on a scratch repository", () => {
   assert.equal(loud.sensitive, true);
   assert.deepEqual(rules(loud.findings).sort(), ["server-action-no-owner", "sql-grant-open-role"]);
   assert.equal(loud.files.find((f) => f.path === "lib/work/actions.ts").sensitive, true, "a use-server file is sensitive wherever it lives");
+
+  // A PR that only deletes the owner check adds no line, and is still judged.
+  run("checkout", "-q", "main");
+  write("lib/work/guarded.ts", '"use server";\nexport async function y() {\n  await getOwner();\n  return 1;\n}\n');
+  run("add", ".");
+  run("commit", "-qm", "guarded");
+  const guardedBase = run("rev-parse", "HEAD");
+  run("checkout", "-qb", "unguard");
+  write("lib/work/guarded.ts", '"use server";\nexport async function y() {\n  return 1;\n}\n');
+  run("commit", "-qam", "drop the check");
+  const unguarded = scanRepository({ repoDir: dir, baseSha: guardedBase, headSha: run("rev-parse", "HEAD"), patterns: PAULLORBER, guardPattern: "getOwner", gateCaller: "", gitleaksReport: "[]" });
+  assert.deepEqual(rules(unguarded.findings), ["server-action-no-owner"]);
   assert.deepEqual(quiet.authorFamilies, []);
   assert.deepEqual(loud.authorFamilies.map((a) => a.family), ["openai"], "the trailer of a PR commit names the author's harness");
+});
+
+test("a reviewer's CLI is installed outside the review copy, whatever the PR planted there", async () => {
+  const root = mkdtempSync(join(tmpdir(), "security-gate-cli-"));
+  const write = (path, text, mode) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+    if (mode) chmodSync(join(root, path), mode);
+  };
+  // The real package, standing in for the registry's.
+  write("registry/gate-cli/package.json", JSON.stringify({ name: "gate-cli", version: "1.0.0", bin: { "gate-cli": "cli.js" } }));
+  write("registry/gate-cli/cli.js", '#!/usr/bin/env node\nprocess.stdout.write("trusted");\n', 0o755);
+  // The PR's copy: the same name and version, already "installed", and an
+  // .npmrc that sends npm to a registry of its own.
+  write("review/package.json", JSON.stringify({ name: "pr", version: "1.0.0", dependencies: { "gate-cli": "1.0.0" } }));
+  write("review/.npmrc", "registry=http://127.0.0.1:9/\n");
+  write("review/node_modules/gate-cli/package.json", JSON.stringify({ name: "gate-cli", version: "1.0.0", bin: { "gate-cli": "cli.js" } }));
+  write("review/node_modules/gate-cli/cli.js", '#!/usr/bin/env node\nprocess.stdout.write("planted");\n', 0o755);
+  write("review/node_modules/.bin/gate-cli", '#!/usr/bin/env node\nprocess.stdout.write("planted");\n', 0o755);
+  mkdirSync(join(root, "home"));
+
+  const env = { PATH: process.env.PATH, HOME: join(root, "home"), npm_config_cache: join(root, "home", ".npm"), npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" };
+  const cli = await installCli({ spec: join(root, "registry", "gate-cli"), bin: "gate-cli", home: join(root, "home"), env, timeoutMs: 120_000 });
+  assert.equal(cli.error, undefined);
+  assert.ok(cli.path.startsWith(join(root, "home") + "/"), "the executable lives in the gate's own directory");
+  assert.equal(execFileSync(cli.path, [], { cwd: join(root, "review"), env, encoding: "utf8" }), "trusted");
+
+  mkdirSync(join(root, "home2"));
+  const missing = await installCli({ spec: join(root, "registry", "nothing-here"), bin: "gate-cli", home: join(root, "home2"), env: { ...env, HOME: join(root, "home2") }, timeoutMs: 120_000 });
+  assert.match(missing.error, /^installing .* failed/);
+  assert.equal(missing.path, undefined);
 });
