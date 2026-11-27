@@ -154,7 +154,7 @@ What "the same" means, and where each part lives:
 |---|---|---|
 | CI | caller `ci.yml` → `app-ci.yml` | every pull request and every push to `main`; a bespoke job only where the product is not a Next.js app (hush, kairos, lacordobesa, muk) |
 | Overlap comment | caller `pr-overlap.yml` → `pr-overlap.yml` | informational, never required |
-| Auto-merge | caller `auto-merge.yml` → `app-auto-merge.yml` | squash, armed when a non-draft PR into `main` opens; never for forks or Dependabot |
+| Auto-merge | caller `auto-merge.yml` → `app-auto-merge.yml` | squash, armed when a non-draft PR into `main` opens; never for forks; Dependabot's are armed by paullorber's issue keeper, not here |
 | Supabase deploy | caller `supabase.yml` → `app-supabase.yml` | only in repos with `supabase/`; on when `SUPABASE_PROJECT_REF` is set |
 | Pin | every `uses: paullorb/cicd/...@<SHA>` | one SHA per repo, the same in all of its callers |
 | Repository settings | GitHub | auto-merge allowed, head branches deleted on merge, "Always suggest updating pull request branches" |
